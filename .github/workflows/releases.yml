@@ -1,0 +1,35 @@
+name: Build and Release KS SQL
+
+on:
+  push:
+    tags:
+      - 'v*' # Trigger on version tags (e.g., v1.0.1)
+  workflow_dispatch: # This allows manual triggering from the GitHub UI
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required to create/upload to releases
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Environment and Build
+        run: |
+          chmod +x setup.sh
+          ./setup.sh
+
+      - name: Create or Update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # If triggered manually, it uses 'manual-build' as the tag
+          tag_name: ${{ github.ref_name || 'manual-build' }}
+          name: Release ${{ github.ref_name || 'Manual Build' }}
+          draft: false
+          prerelease: false
+          files: |
+            target/release/ks-sql
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
