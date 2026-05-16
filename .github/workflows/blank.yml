@@ -1,0 +1,44 @@
+name: Download, Unzip, and Commit Files
+
+on:
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  download-and-upload:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download the zip file
+        run: |
+          curl -L -o download.zip "https://github.com/kswarrior/KSSQL/releases/download/ks-sql-engine-impl-863555939441587998/jules_session_863555939441587998.zip"
+
+      - name: Unzip the file
+        run: |
+          # Unzips into the current directory, overwriting existing files if they exist
+          unzip -o download.zip
+          
+          # Optional: Remove the zip file so it doesn't get committed to the repo
+          rm download.zip
+
+      - name: Commit and push changes
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          # Stage all the unzipped files
+          git add .
+          
+          # Check if there are actually changes to commit so the workflow doesn't fail
+          if git diff-index --quiet HEAD --; then
+            echo "No new changes to commit."
+          else
+            git commit -m "Automated: Unzipped and added jules_session files"
+            git push
+          fi
