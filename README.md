@@ -21,7 +21,7 @@
     -   **Explicit Indexing:** `CREATE INDEX` for O(1) B+Tree lookups.
 -   **Snapshot Isolation (MVCC/OCC):** Multi-Version Concurrency Control with versioned records. Readers never block writers. Transactions include automated conflict resolution with exponential backoff.
 -   **High-Performance Memory Tier (Redis Mode):** Integrated lock-free cache achieving over **6.0 Million operations/sec**.
--   **Conditional Dashboard Security:** Support for both standard HTTP and encrypted HTTPS (Built-in SSL) modes.
+-   **Cyberpunk Command Center:** Responsive, high-fidelity web dashboard with real-time telemetry and built-in SSL support.
 -   **Programmable WASM:** High-speed stored procedures via an integrated WASM runtime (`CALL 'module.wasm'`).
 -   **Time Machine Recovery:** Point-in-time state restoration with `undo` and `redo` capabilities.
 
@@ -64,16 +64,62 @@ cargo build --release
 Start the engine in Titan-Prime mode:
 
 ```bash
-# Start with standard HTTP Dashboard
-./target/release/ks-sql --port w:8080 m:5432 --db ks_database.ksql
+# Start with custom credentials
+./target/release/ks-sql --port w:8080 m:5432 --user myuser --password mypass --db ks_database.ksql
 
 # Start with Secured SSL (HTTPS) Dashboard
 ./target/release/ks-sql --port w:8080:ssl m:5432 --db ks_database.ksql
 ```
 
--   **Dashboard:** `https://localhost:8080/ks` (If SSL enabled) or `http://localhost:8080/ks`
--   **Admin Secret:** Set via `KSSQL_ADMIN_SECRET` env var (Default: `admin`).
+-   **Dashboard:** `http://localhost:8080/` (Now served at root)
+-   **Credentials:** Configured via `--user` and `--password` flags (Default: `admin`/`admin`).
 -   **TCP Connection:** `ksql://admin:password@localhost:5432`
+
+### Client Connection Examples
+
+#### Python (`db.py`)
+```python
+import socket
+
+def query(sql, user='admin', password='admin', host='localhost', port=5432):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.connect((host, port))
+        # Handshake: AUTH <user>:<pass>
+        s.sendall(f"AUTH {user}:{password}\n".encode())
+        auth_resp = s.recv(1024).decode()
+        if "AUTHENTICATED" not in auth_resp:
+            print("Authentication failed")
+            return
+        
+        s.sendall(f"{sql}\n".encode())
+        print(s.recv(4096).decode())
+
+query("SELECT * FROM users LIMIT 5")
+```
+
+#### Node.js (`db.js`)
+```javascript
+const net = require('net');
+
+function query(sql, user='admin', password='admin', host='localhost', port=5432) {
+    const client = new net.Socket();
+    client.connect(port, host, () => {
+        client.write(`AUTH ${user}:${password}\n`);
+    });
+
+    client.on('data', (data) => {
+        const resp = data.toString();
+        if (resp.includes("AUTHENTICATED")) {
+            client.write(`${sql}\n`);
+        } else {
+            console.log("Result:\n", resp);
+            client.destroy();
+        }
+    });
+}
+
+query("CREATE TABLE test (val TEXT); INSERT INTO test VALUES ('Titan-Prime'); SELECT * FROM test;");
+```
 
 ### SQL Examples:
 ```sql
