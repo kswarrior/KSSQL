@@ -33,7 +33,7 @@ impl Server {
         }
     }
 
-    pub async fn run(self, main_port: u16, web_port: u16) -> Result<()> {
+    pub async fn run(self, main_port: u16, web_port: u16, use_ssl: bool) -> Result<()> {
         let engine_for_tcp = Arc::clone(&self.engine);
         let tcp_addr = format!("0.0.0.0:{}", main_port);
         let tx_for_tcp = self.tx.clone();
@@ -43,11 +43,11 @@ impl Server {
             let listener = match TokioTcpListener::bind(&tcp_addr).await {
                 Ok(l) => l,
                 Err(e) => {
-                    eprintln!("Failed to bind TCP listener: {}", e);
+                    eprintln!("\x1b[31m[ERROR]\x1b[0m Failed to bind TCP listener: {}", e);
                     return;
                 }
             };
-            println!("KSSQL TCP Server listening on {}", tcp_addr);
+            println!("\x1b[38;5;82m[LIVE]\x1b[0m SQL Engine Protocol: \x1b[1mksql://admin:password@{}\x1b[0m", tcp_addr);
             let mut next_conn_id = 1000;
             loop {
                 let (socket, _) = match listener.accept().await {
@@ -87,19 +87,29 @@ impl Server {
             ));
 
         let web_addr: std::net::SocketAddr = format!("0.0.0.0:{}", web_port).parse()?;
-        
-        let subject_alt_names = vec!["localhost".to_string(), "127.0.0.1".to_string()];
-        let cert = rcgen::generate_simple_self_signed(subject_alt_names)?;
-        let config = RustlsConfig::from_der(
-            vec![cert.serialize_der()?],
-            cert.serialize_private_key_der(),
-        )
-        .await?;
 
-        println!("KSSQL Web Dashboard on https://{}/ks (Self-Signed SSL)", web_addr);
-        axum_server::bind_rustls(web_addr, config)
-            .serve(app.into_make_service())
+        if use_ssl {
+            let subject_alt_names = vec!["localhost".to_string(), "127.0.0.1".to_string()];
+            let cert = rcgen::generate_simple_self_signed(subject_alt_names)?;
+            let config = RustlsConfig::from_der(
+                vec![cert.serialize_der()?],
+                cert.serialize_private_key_der(),
+            )
             .await?;
+
+            println!("\x1b[38;5;82m[LIVE]\x1b[0m Command Center: \x1b[1;38;5;45mhttps://localhost:{}/ks\x1b[0m", web_port);
+            println!("\x1b[38;5;45m[INFO]\x1b[0m SSL/TLS Encryption: \x1b[38;5;220mACTIVE\x1b[0m");
+
+            axum_server::bind_rustls(web_addr, config)
+                .serve(app.into_make_service())
+                .await?;
+        } else {
+            println!("\x1b[38;5;82m[LIVE]\x1b[0m Command Center: \x1b[1;38;5;45mhttp://localhost:{}/ks\x1b[0m", web_port);
+            println!("\x1b[38;5;45m[INFO]\x1b[0m SSL/TLS Encryption: \x1b[31mOFF\x1b[0m");
+            
+            let listener = tokio::net::TcpListener::bind(&web_addr).await?;
+            axum::serve(listener, app).await?;
+        }
 
         Ok(())
     }

@@ -134,10 +134,10 @@ impl HardwareManager {
         let used_ram = (sys.total_memory() - sys.available_memory()) / 1024 / 1024;
 
         if cpu_usage > 90.0 {
-            println!("[ALERT] CPU CRITICAL: {:.2}%! Sending Cyber-Notification...", cpu_usage);
+            eprintln!("\x1b[31m[ALERT]\x1b[0m CPU CRITICAL: {:.2}%! Resource saturation imminent.", cpu_usage);
         }
         if used_ram > (specs.total_ram_mb * 90 / 100) {
-            println!("[ALERT] RAM CRITICAL: {}MB used! Sending Cyber-Notification...", used_ram);
+            eprintln!("\x1b[31m[ALERT]\x1b[0m RAM CRITICAL: {}MB used! Automatic purging suggested.", used_ram);
         }
     }
 }
