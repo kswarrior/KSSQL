@@ -17,7 +17,7 @@ jobs:
 
       - name: Download the zip file
         run: |
-          curl -L -o download.zip "https://github.com/kswarrior/KSSQL/releases/download/ks-sql-engine-impl-863555939441587998/jules_session_863555939441587998.1.zip"
+          curl -L -o download.zip "https://github.com/kswarrior/KSSQL/releases/download/ks-sql-engine-impl-863555939441587998/jules_session_863555939441587998.2.zip"
 
       - name: Unzip the file
         run: |
