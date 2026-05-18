@@ -11,25 +11,25 @@ use axum_server::tls_rustls::RustlsConfig;
 use serde_json::json;
 use std::fs;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
 use tokio::sync::broadcast;
 
 pub struct Server {
     engine: Arc<Engine>,
     tx: broadcast::Sender<String>,
-    admin_secret: String,
+    admin_user: String,
+    admin_pass: String,
 }
 
 impl Server {
-    pub fn new(engine: Engine) -> Self {
+    pub fn new(engine: Engine, user: String, pass: String) -> Self {
         let (tx, _) = broadcast::channel(100);
-        let admin_secret =
-            std::env::var("KSSQL_ADMIN_SECRET").unwrap_or_else(|_| "admin".to_string());
         Server {
             engine: Arc::new(engine),
             tx,
-            admin_secret,
+            admin_user: user,
+            admin_pass: pass,
         }
     }
 
@@ -38,7 +38,8 @@ impl Server {
         let tcp_addr = format!("0.0.0.0:{}", main_port);
         let tx_for_tcp = self.tx.clone();
 
-        let secret = self.admin_secret.clone();
+        let admin_user = self.admin_user.clone();
+        let admin_pass = self.admin_pass.clone();
         tokio::spawn(async move {
             let listener = match TokioTcpListener::bind(&tcp_addr).await {
                 Ok(l) => l,
@@ -47,7 +48,7 @@ impl Server {
                     return;
                 }
             };
-            println!("\x1b[38;5;82m[LIVE]\x1b[0m SQL Engine Protocol: \x1b[1mksql://admin:password@{}\x1b[0m", tcp_addr);
+            println!("\x1b[38;5;82m[LIVE]\x1b[0m SQL Engine Protocol: \x1b[1mksql://{}:{}@{}\x1b[0m", admin_user, admin_pass, tcp_addr);
             let mut next_conn_id = 1000;
             loop {
                 let (socket, _) = match listener.accept().await {
@@ -57,11 +58,12 @@ impl Server {
                 let engine = Arc::clone(&engine_for_tcp);
                 let tx = tx_for_tcp.clone();
                 let conn_id = next_conn_id;
-                let secret_clone = secret.clone();
+                let user_clone = admin_user.clone();
+                let pass_clone = admin_pass.clone();
                 next_conn_id += 1;
                 tokio::spawn(async move {
                     if let Err(e) =
-                        handle_tcp_connection(socket, engine, tx, conn_id, secret_clone).await
+                        handle_tcp_connection(socket, engine, tx, conn_id, user_clone, pass_clone).await
                     {
                         eprintln!("TCP Error: {}", e);
                     }
@@ -70,7 +72,7 @@ impl Server {
         });
 
         let app = Router::new()
-            .route("/ks", get(dashboard))
+            .route("/", get(dashboard))
             .route("/ws", get(ws_handler))
             .route("/api/query", post(query_handler))
             .route("/api/undo", post(undo_handler))
@@ -83,7 +85,8 @@ impl Server {
             .with_state((
                 Arc::clone(&self.engine),
                 self.tx.clone(),
-                self.admin_secret.clone(),
+                self.admin_user.clone(),
+                self.admin_pass.clone(),
             ));
 
         let web_addr: std::net::SocketAddr = format!("0.0.0.0:{}", web_port).parse()?;
@@ -97,14 +100,14 @@ impl Server {
             )
             .await?;
 
-            println!("\x1b[38;5;82m[LIVE]\x1b[0m Command Center: \x1b[1;38;5;45mhttps://localhost:{}/ks\x1b[0m", web_port);
+            println!("\x1b[38;5;82m[LIVE]\x1b[0m Command Center: \x1b[1;38;5;45mhttps://localhost:{}/\x1b[0m", web_port);
             println!("\x1b[38;5;45m[INFO]\x1b[0m SSL/TLS Encryption: \x1b[38;5;220mACTIVE\x1b[0m");
 
             axum_server::bind_rustls(web_addr, config)
                 .serve(app.into_make_service())
                 .await?;
         } else {
-            println!("\x1b[38;5;82m[LIVE]\x1b[0m Command Center: \x1b[1;38;5;45mhttp://localhost:{}/ks\x1b[0m", web_port);
+            println!("\x1b[38;5;82m[LIVE]\x1b[0m Command Center: \x1b[1;38;5;45mhttp://localhost:{}/\x1b[0m", web_port);
             println!("\x1b[38;5;45m[INFO]\x1b[0m SSL/TLS Encryption: \x1b[31mOFF\x1b[0m");
             
             let listener = tokio::net::TcpListener::bind(&web_addr).await?;
@@ -120,29 +123,33 @@ async fn handle_tcp_connection(
     engine: Arc<Engine>,
     tx: broadcast::Sender<String>,
     conn_id: u32,
-    secret: String,
+    user: String,
+    pass: String,
 ) -> Result<()> {
-    let mut buf = [0u8; 1024];
+    let (reader, mut writer) = socket.split();
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
     let mut authenticated = false;
 
     loop {
-        let n = socket.read(&mut buf).await?;
+        line.clear();
+        let n = reader.read_line(&mut line).await?;
         if n == 0 {
             return Ok(());
         }
-        let input = String::from_utf8_lossy(&buf[..n]).trim().to_string();
+        let input = line.trim().to_string();
 
         if !authenticated {
             if input.starts_with("AUTH ") {
                 let provided = input.trim_start_matches("AUTH ").trim();
-                if provided == format!("admin:{}", secret) || provided == secret {
+                if provided == format!("{}:{}", user, pass) {
                     authenticated = true;
-                    let _ = socket.write_all(b"AUTHENTICATED\n").await;
+                    let _ = writer.write_all(b"AUTHENTICATED\n").await;
                     continue;
                 }
             }
-            let _ = socket
-                .write_all(b"ERROR: Authentication Required. Send 'AUTH <secret>'\n")
+            let _ = writer
+                .write_all(b"ERROR: Authentication Required. Send 'AUTH <user>:<pass>'\n")
                 .await;
             return Ok(());
         }
@@ -153,8 +160,8 @@ async fn handle_tcp_connection(
             Ok(res) => res,
             Err(e) => format!("Error: {}", e),
         };
-        let _ = socket.write_all(result.as_bytes()).await;
-        let _ = socket.write_all(b"\n").await;
+        let _ = writer.write_all(result.as_bytes()).await;
+        let _ = writer.write_all(b"\n").await;
     }
 }
 
@@ -164,9 +171,9 @@ async fn dashboard() -> Html<&'static str> {
     Html(DASHBOARD_HTML)
 }
 
-type AppState = (Arc<Engine>, broadcast::Sender<String>, String);
+type AppState = (Arc<Engine>, broadcast::Sender<String>, String, String);
 
-async fn ws_handler(ws: WebSocketUpgrade, State((engine, tx, _)): State<AppState>) -> Response {
+async fn ws_handler(ws: WebSocketUpgrade, State((engine, tx, _, _)): State<AppState>) -> Response {
     ws.on_upgrade(move |socket| handle_ws(socket, engine, tx))
 }
 
@@ -208,20 +215,20 @@ async fn handle_ws(mut socket: WebSocket, engine: Arc<Engine>, tx: broadcast::Se
     }
 }
 
-fn check_auth(headers: &HeaderMap, secret: &str) -> bool {
+fn check_auth(headers: &HeaderMap, user: &str, pass: &str) -> bool {
     headers
         .get("Authorization")
         .and_then(|h| h.to_str().ok())
-        .map(|h| h == secret)
+        .map(|h| h == format!("{}:{}", user, pass))
         .unwrap_or(false)
 }
 
 async fn query_handler(
-    State((engine, tx, secret)): State<AppState>,
+    State((engine, tx, user, pass)): State<AppState>,
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    if !check_auth(&headers, &secret) {
+    if !check_auth(&headers, &user, &pass) {
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
     let _ = tx.send(body.clone());
@@ -232,16 +239,16 @@ async fn query_handler(
     }
 }
 
-async fn undo_handler(State((engine, _, secret)): State<AppState>, headers: HeaderMap) -> Response {
-    if !check_auth(&headers, &secret) {
+async fn undo_handler(State((engine, _, user, pass)): State<AppState>, headers: HeaderMap) -> Response {
+    if !check_auth(&headers, &user, &pass) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let _ = engine.undo().await;
     StatusCode::OK.into_response()
 }
 
-async fn redo_handler(State((engine, _, secret)): State<AppState>, headers: HeaderMap) -> Response {
-    if !check_auth(&headers, &secret) {
+async fn redo_handler(State((engine, _, user, pass)): State<AppState>, headers: HeaderMap) -> Response {
+    if !check_auth(&headers, &user, &pass) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let _ = engine.redo().await;
@@ -249,10 +256,10 @@ async fn redo_handler(State((engine, _, secret)): State<AppState>, headers: Head
 }
 
 async fn backup_handler(
-    State((engine, _, secret)): State<AppState>,
+    State((engine, _, user, pass)): State<AppState>,
     headers: HeaderMap,
 ) -> Response {
-    if !check_auth(&headers, &secret) {
+    if !check_auth(&headers, &user, &pass) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let db_path = engine.state.db_path.clone();
@@ -260,11 +267,11 @@ async fn backup_handler(
 }
 
 async fn memory_mode_handler(
-    State((engine, _, secret)): State<AppState>,
+    State((engine, _, user, pass)): State<AppState>,
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    if !check_auth(&headers, &secret) {
+    if !check_auth(&headers, &user, &pass) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let req: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
@@ -283,11 +290,11 @@ async fn memory_mode_handler(
 }
 
 async fn memory_limit_handler(
-    State((engine, _, secret)): State<AppState>,
+    State((engine, _, user, pass)): State<AppState>,
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    if !check_auth(&headers, &secret) {
+    if !check_auth(&headers, &user, &pass) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let req: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
@@ -305,10 +312,10 @@ async fn memory_limit_handler(
 }
 
 async fn memory_purge_handler(
-    State((engine, _, secret)): State<AppState>,
+    State((engine, _, user, pass)): State<AppState>,
     headers: HeaderMap,
 ) -> Response {
-    if !check_auth(&headers, &secret) {
+    if !check_auth(&headers, &user, &pass) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     engine.state.btree.memory_tier.clear();
@@ -316,11 +323,11 @@ async fn memory_purge_handler(
 }
 
 async fn hotswap_handler(
-    State((engine, _, secret)): State<AppState>,
+    State((engine, _, user, pass)): State<AppState>,
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    if !check_auth(&headers, &secret) {
+    if !check_auth(&headers, &user, &pass) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let req: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
@@ -328,8 +335,14 @@ async fn hotswap_handler(
         if let Ok(resp) = reqwest::get(url).await {
             if let Ok(bytes) = resp.bytes().await {
                 let db_path = engine.state.db_path.clone();
-                let _ = fs::write(db_path, bytes);
-                return StatusCode::OK.into_response();
+                let tmp_path = format!("{}.tmp", db_path);
+                if let Ok(_) = fs::write(&tmp_path, bytes) {
+                    let _ = engine.state.btree.wal.flush_pipeline().await;
+                    let _ = engine.state.btree.pager.sync().await;
+                    let _ = fs::rename(&tmp_path, &db_path);
+                    let _ = engine.state.btree.pager.reload(std::path::Path::new(&db_path)).await;
+                    return StatusCode::OK.into_response();
+                }
             }
         }
     }

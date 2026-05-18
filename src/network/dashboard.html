@@ -11,7 +11,7 @@
             --bg-dark: #0a0a0c;
             --neon-blue: #00f2ff;
             --neon-magenta: #ff2e63;
-            --glass-bg: rgba(10, 10, 12, 0.7);
+            --glass-bg: rgba(10, 10, 12, 0.9);
             --sidebar-width: 280px;
         }
         body {
@@ -21,9 +21,10 @@
             background-image: 
                 radial-gradient(circle at 10% 10%, rgba(0, 242, 255, 0.05) 0%, transparent 50%),
                 radial-gradient(circle at 90% 90%, rgba(255, 46, 99, 0.05) 0%, transparent 50%);
-            overflow: hidden;
+            overflow-x: hidden;
         }
         .orbitron { font-family: 'Orbitron', sans-serif; }
+        
         .glass-sidebar {
             width: var(--sidebar-width);
             height: 100vh;
@@ -34,16 +35,50 @@
             left: 0;
             top: 0;
             z-index: 100;
+            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
         }
+
+        @media (max-width: 1024px) {
+            .glass-sidebar {
+                transform: translateX(-100%);
+            }
+            .glass-sidebar.open {
+                transform: translateX(0);
+            }
+            .main-container {
+                margin-left: 0 !important;
+            }
+        }
+
         .main-container {
             margin-left: var(--sidebar-width);
-            height: 100vh;
-            overflow-y: auto;
+            min-height: 100vh;
+            transition: margin-left 0.3s;
         }
+        
+        .mobile-header {
+            display: none;
+            position: sticky;
+            top: 0;
+            z-index: 90;
+            background: rgba(10, 10, 12, 0.8);
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            padding: 1rem 1.5rem;
+        }
+
+        @media (max-width: 1024px) {
+            .mobile-header {
+                display: flex;
+                justify-content: space-between;
+                items-center;
+            }
+        }
+
         .nav-item {
             padding: 1.25rem 2rem;
             display: flex;
-            items-center;
+            align-items: center;
             gap: 1rem;
             color: #666;
             transition: all 0.3s;
@@ -62,54 +97,70 @@
             border: 1px solid rgba(255, 255, 255, 0.05);
             border-radius: 4px;
         }
-        .neon-border-blue { border: 1px solid var(--neon-blue); box-shadow: 0 0 15px rgba(0, 242, 255, 0.2); }
         .pulse-btn:active { transform: scale(0.98); filter: brightness(1.2); }
-        .hidden { display: none; }
         
-        /* Terminal Syntax Highlighting */
         .terminal-area {
             background: rgba(0,0,0,0.8);
             border-left: 2px solid var(--neon-blue);
         }
         
-        /* Gauge / Slider Styling */
-        input[type="range"] {
-            -webkit-appearance: none;
-            width: 100%;
-            background: transparent;
+        /* Hamburger Icon */
+        .menu-icon {
+            width: 24px;
+            height: 18px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            cursor: pointer;
         }
-        input[type="range"]::-webkit-slider-runnable-track {
-            width: 100%;
-            height: 4px;
-            background: rgba(255,255,255,0.1);
-        }
-        input[type="range"]::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            height: 16px;
-            width: 16px;
-            border-radius: 50%;
+        .menu-icon div {
+            height: 2px;
             background: var(--neon-blue);
-            margin-top: -6px;
-            box-shadow: 0 0 10px var(--neon-blue);
+            width: 100%;
+            border-radius: 2px;
+            transition: 0.3s;
         }
-        
+
         .saturation-warning {
             border-color: var(--neon-magenta) !important;
             box-shadow: 0 0 30px rgba(255, 46, 99, 0.3) !important;
             color: var(--neon-magenta) !important;
         }
+        input::placeholder { color: rgba(255, 255, 255, 0.2); }
     </style>
 </head>
-<body class="flex h-screen w-screen">
+<body class="flex min-h-screen w-screen overflow-x-hidden">
+    
+    <!-- MOBILE HEADER -->
+    <header class="mobile-header w-full">
+        <div class="flex items-center gap-3">
+             <div class="w-8 h-8 border border-[#00f2ff] rotate-45 flex items-center justify-center">
+                <span class="rotate-[-45deg] font-bold text-[#00f2ff] text-xs">KS</span>
+            </div>
+            <span class="orbitron font-bold text-sm tracking-tighter">KS SQL</span>
+        </div>
+        <div class="menu-icon" onclick="toggleSidebar()">
+            <div></div>
+            <div></div>
+            <div></div>
+        </div>
+    </header>
+
     <!-- GLASSY SIDEBAR -->
-    <aside class="glass-sidebar flex flex-col">
-        <div class="p-8 mb-8">
+    <aside id="sidebar" class="glass-sidebar flex flex-col">
+        <div class="p-8 mb-8 hidden lg:block">
             <div class="flex items-center gap-3 mb-2">
                 <div class="w-10 h-10 border-2 border-[#00f2ff] rotate-45 flex items-center justify-center shadow-[0_0_15px_#00f2ff]">
                     <span class="rotate-[-45deg] font-bold text-[#00f2ff]">KS</span>
                 </div>
                 <h1 class="orbitron font-bold text-xl tracking-tighter">KS SQL <span class="text-[10px] block text-gray-500">ENTERPRISE JET-V4</span></h1>
             </div>
+        </div>
+        
+        <!-- Mobile Sidebar Header -->
+        <div class="p-6 flex justify-between items-center lg:hidden border-b border-white/5">
+             <span class="orbitron font-bold text-xs tracking-widest text-[#00f2ff]">COMMAND CENTER</span>
+             <span class="text-gray-500 text-xl cursor-pointer" onclick="toggleSidebar()">&times;</span>
         </div>
 
         <nav class="flex-grow">
@@ -123,6 +174,13 @@
                 <span>03</span> TOP HARDER
             </div>
         </nav>
+
+        <!-- SECURITY SETTINGS -->
+        <div class="p-6 border-t border-white/5 space-y-3">
+            <span class="text-[10px] orbitron text-gray-500 uppercase tracking-widest">Security Protocol</span>
+            <input type="text" id="auth_user" placeholder="USER" class="w-full bg-white/5 border border-white/10 rounded p-2 text-[10px] text-[#00f2ff] outline-none font-mono">
+            <input type="password" id="auth_pass" placeholder="PASS" class="w-full bg-white/5 border border-white/10 rounded p-2 text-[10px] text-[#00f2ff] outline-none font-mono">
+        </div>
 
         <div class="p-8 border-t border-white/5 space-y-4">
             <div class="flex justify-between items-center text-[10px] text-gray-500 orbitron">
@@ -139,73 +197,61 @@
     <main class="main-container flex-grow relative">
         
         <!-- PAGE 1: TERMINAL -->
-        <section id="page-terminal" class="p-12 space-y-8 animate-fadeIn">
-            <div class="flex justify-between items-end">
+        <section id="page-terminal" class="p-6 lg:p-12 space-y-8">
+            <div class="flex flex-col lg:flex-row justify-between lg:items-end gap-4">
                 <div>
-                    <h2 class="text-4xl orbitron font-bold mb-2">ACCESS TERMINAL</h2>
-                    <p class="text-xs text-gray-500 uppercase tracking-[0.3em]">Optimistic Concurrency Execution Layer</p>
+                    <h2 class="text-2xl lg:text-4xl orbitron font-bold mb-2">ACCESS TERMINAL</h2>
+                    <p class="text-[10px] text-gray-500 uppercase tracking-[0.3em]">Optimistic Concurrency Execution Layer</p>
                 </div>
-                <div class="text-right">
+                <div class="text-left lg:text-right">
                     <span class="text-[10px] text-gray-600 block mb-1">LATENCY</span>
                     <span id="terminalLatency" class="text-xl text-[#00f2ff] font-mono">0.02ms</span>
                 </div>
             </div>
 
-            <div class="glass-card terminal-area p-8 relative min-h-[60vh] flex flex-col">
-                <div class="absolute top-0 right-0 p-4 flex gap-2">
-                    <div class="w-2 h-2 rounded-full bg-red-500"></div>
-                    <div class="w-2 h-2 rounded-full bg-yellow-500"></div>
-                    <div class="w-2 h-2 rounded-full bg-green-500"></div>
-                </div>
+            <div class="glass-card terminal-area p-4 lg:p-8 relative min-h-[50vh] lg:min-h-[60vh] flex flex-col">
                 <textarea id="sqlInput" class="flex-grow bg-transparent text-[#00f2ff] font-mono outline-none resize-none text-sm" placeholder="SELECT * FROM vps_clusters WHERE status = 'ACTIVE'..."></textarea>
-                <div class="mt-8 pt-8 border-t border-white/5">
-                    <button onclick="executeSQL()" class="pulse-btn w-full bg-[#00f2ff] text-black py-4 orbitron font-bold text-sm tracking-widest uppercase shadow-[0_0_20px_rgba(0,242,255,0.4)] transition-all">Execute Protocol [SHIFT+ENTER]</button>
+                <div class="mt-4 lg:mt-8 pt-4 lg:pt-8 border-t border-white/5">
+                    <button onclick="executeSQL()" class="pulse-btn w-full bg-[#00f2ff] text-black py-4 orbitron font-bold text-xs lg:text-sm tracking-widest uppercase shadow-[0_0_20px_rgba(0,242,255,0.4)] transition-all">Execute Protocol [SHIFT+ENTER]</button>
                 </div>
             </div>
 
-            <div id="resultArea" class="glass-card p-6 font-mono text-[11px] text-gray-400 overflow-x-auto whitespace-pre">
+            <div id="resultArea" class="glass-card p-6 font-mono text-[10px] lg:text-[11px] text-gray-400 overflow-x-auto whitespace-pre">
                 >> WAITING FOR INPUT...
             </div>
         </section>
 
         <!-- PAGE 2: STORAGE & RESILIENCE -->
-        <section id="page-storage" class="p-12 space-y-12 hidden animate-fadeIn">
+        <section id="page-storage" class="p-6 lg:p-12 space-y-12 hidden">
             <div>
-                <h2 class="text-4xl orbitron font-bold mb-2">RESILIENCE LAYER</h2>
-                <p class="text-xs text-gray-500 uppercase tracking-[0.3em]">Snapshot Isolation & Recovery tools</p>
+                <h2 class="text-2xl lg:text-4xl orbitron font-bold mb-2">RESILIENCE LAYER</h2>
+                <p class="text-[10px] text-gray-500 uppercase tracking-[0.3em]">Snapshot Isolation & Recovery tools</p>
             </div>
 
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-12">
-                <!-- Backup/Restore -->
-                <div class="glass-card p-10 space-y-8">
-                    <h3 class="orbitron font-bold text-[#00f2ff] border-b border-white/5 pb-4 uppercase text-sm tracking-widest">Binary Snapshotting</h3>
-                    
+            <div class="grid grid-cols-1 xl:grid-cols-2 gap-8 lg:gap-12">
+                <div class="glass-card p-6 lg:p-10 space-y-8">
+                    <h3 class="orbitron font-bold text-[#00f2ff] border-b border-white/5 pb-4 uppercase text-xs lg:text-sm tracking-widest">Binary Snapshotting</h3>
                     <div class="space-y-6">
-                        <div class="p-6 bg-white/5 rounded border border-white/5">
+                        <div class="p-4 lg:p-6 bg-white/5 rounded border border-white/5">
                             <h4 class="text-xs orbitron mb-2">Instant Binary Clone</h4>
-                            <p class="text-[10px] text-gray-500 mb-4">Creates a perfect byte-for-byte copy of the database without locking reads.</p>
-                            <button onclick="snapshot()" class="w-full py-3 bg-white/5 border border-[#00f2ff]/50 text-[#00f2ff] text-xs orbitron hover:bg-[#00f2ff]/10 transition-all">GENERATE SNAPSHOT</button>
+                            <p class="text-[10px] text-gray-500 mb-4">Creates a perfect byte-for-byte copy of the database.</p>
+                            <button onclick="snapshot()" class="w-full py-3 bg-white/5 border border-[#00f2ff]/50 text-[#00f2ff] text-[10px] lg:text-xs orbitron hover:bg-[#00f2ff]/10 transition-all">GENERATE SNAPSHOT</button>
                         </div>
-                        <div class="p-6 bg-white/5 rounded border border-white/5">
+                        <div class="p-4 lg:p-6 bg-white/5 rounded border border-white/5">
                             <h4 class="text-xs orbitron mb-2">Point-In-Time Restore</h4>
-                            <p class="text-[10px] text-gray-500 mb-4">Restore from an external .ksql or .wal archive module.</p>
-                            <button onclick="hotswap()" class="w-full py-3 bg-white/5 border border-white/20 text-gray-400 text-xs orbitron hover:bg-white/10 transition-all">LOAD EXTERNAL MODULE</button>
+                            <p class="text-[10px] text-gray-500 mb-4">Restore from an external archive module.</p>
+                            <button onclick="hotswap()" class="w-full py-3 bg-white/5 border border-white/20 text-gray-400 text-[10px] lg:text-xs orbitron hover:bg-white/10 transition-all">LOAD EXTERNAL MODULE</button>
                         </div>
                     </div>
                 </div>
 
-                <!-- Time Machine -->
-                <div class="glass-card p-10 space-y-8">
-                    <h3 class="orbitron font-bold text-[#ff2e63] border-b border-white/5 pb-4 uppercase text-sm tracking-widest">Time Machine</h3>
-                    <div class="flex flex-col items-center justify-center h-64 border border-white/5 rounded relative overflow-hidden bg-black/40">
-                         <div class="absolute inset-0 flex items-center justify-center opacity-10">
-                            <div class="w-48 h-48 border-4 border-[#ff2e63] rounded-full animate-ping"></div>
-                         </div>
-                         <div class="text-4xl font-mono text-[#ff2e63] mb-4" id="currentVersion">V.1042</div>
-                         <div class="text-[9px] text-gray-500 orbitron uppercase tracking-[0.5em] mb-8">Isolated Snapshots</div>
-                         <div class="flex gap-4 w-full px-12">
-                             <button onclick="undo()" class="flex-grow py-3 bg-white/5 border border-white/10 text-xs orbitron hover:text-[#ff2e63] transition-all">REVERT</button>
-                             <button onclick="redo()" class="flex-grow py-3 bg-white/5 border border-white/10 text-xs orbitron hover:text-[#00f2ff] transition-all">FAST-FWD</button>
+                <div class="glass-card p-6 lg:p-10 space-y-8">
+                    <h3 class="orbitron font-bold text-[#ff2e63] border-b border-white/5 pb-4 uppercase text-xs lg:text-sm tracking-widest">Time Machine</h3>
+                    <div class="flex flex-col items-center justify-center h-48 lg:h-64 border border-white/5 rounded relative overflow-hidden bg-black/40">
+                         <div class="text-3xl lg:text-4xl font-mono text-[#ff2e63] mb-4" id="currentVersion">V.1042</div>
+                         <div class="flex gap-4 w-full px-6 lg:px-12">
+                             <button onclick="undo()" class="flex-grow py-3 bg-white/5 border border-white/10 text-[10px] lg:text-xs orbitron hover:text-[#ff2e63] transition-all">REVERT</button>
+                             <button onclick="redo()" class="flex-grow py-3 bg-white/5 border border-white/10 text-[10px] lg:text-xs orbitron hover:text-[#00f2ff] transition-all">FAST-FWD</button>
                          </div>
                     </div>
                 </div>
@@ -213,100 +259,52 @@
         </section>
 
         <!-- PAGE 3: TOP HARDER (SYSTEM MONITOR) -->
-        <section id="page-monitor" class="p-12 space-y-12 hidden animate-fadeIn">
-            <div class="flex justify-between items-end">
+        <section id="page-monitor" class="p-6 lg:p-12 space-y-12 hidden">
+            <div class="flex flex-col lg:flex-row justify-between lg:items-end gap-6">
                 <div>
-                    <h2 class="text-4xl orbitron font-bold mb-2">TOP HARDER</h2>
-                    <p class="text-xs text-gray-500 uppercase tracking-[0.3em]">Hardware Autopilot & Engine Tuner</p>
+                    <h2 class="text-2xl lg:text-4xl orbitron font-bold mb-2">TOP HARDER</h2>
+                    <p class="text-[10px] text-gray-500 uppercase tracking-[0.3em]">Hardware Autopilot & Engine Tuner</p>
                 </div>
-                <div class="flex gap-12">
+                <div class="flex gap-8 lg:gap-12">
                     <div class="text-right">
-                        <span class="text-[10px] text-gray-600 block mb-1">JET BUFFER</span>
-                        <span id="jetBufferSize" class="text-xl text-[#00f2ff] font-mono">102.4 MB</span>
+                        <span class="text-[10px] text-gray-600 block mb-1 uppercase">Jet Buffer</span>
+                        <span id="jetBufferSize" class="text-lg lg:text-xl text-[#00f2ff] font-mono">102.4 MB</span>
                     </div>
                     <div class="text-right">
-                        <span class="text-[10px] text-gray-600 block mb-1">RPS (VELOCITY)</span>
-                        <span id="rpsGauge" class="text-xl text-[#00f2ff] font-mono">14,204</span>
+                        <span class="text-[10px] text-gray-600 block mb-1 uppercase">Velocity</span>
+                        <span id="rpsGauge" class="text-lg lg:text-xl text-[#00f2ff] font-mono">14,204</span>
                     </div>
                 </div>
             </div>
 
-            <!-- LIVE MONITORING -->
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-8 h-48">
-                <div class="glass-card p-6 flex flex-col justify-between">
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 lg:gap-8">
+                <div class="glass-card p-6 flex flex-col justify-between h-40 lg:h-48">
                     <span class="text-[10px] orbitron text-gray-500 uppercase">CPU Saturation</span>
-                    <svg viewBox="0 0 100 40" class="w-full h-24">
-                        <path id="cpuGraph" d="M0,40 L10,35 L20,38 L30,20 L40,25 L50,10 L60,15 L70,5 L80,12 L90,8 L100,20" fill="none" stroke="#00f2ff" stroke-width="2" class="transition-all duration-300"></path>
-                    </svg>
-                    <div class="flex justify-between font-mono text-[10px]">
+                    <div class="flex justify-between font-mono text-[10px] mt-4">
                         <span>CORES: <span id="cpuCores">8</span></span>
                         <span id="cpuLoad">12.4%</span>
                     </div>
                 </div>
-                <div class="glass-card p-6 flex flex-col justify-between">
+                <div class="glass-card p-6 flex flex-col justify-between h-40 lg:h-48">
                     <span class="text-[10px] orbitron text-gray-500 uppercase">Memory Footprint</span>
-                    <svg viewBox="0 0 100 40" class="w-full h-24">
-                        <path id="ramGraph" d="M0,40 Q50,20 100,30" fill="none" stroke="#ff2e63" stroke-width="2" class="transition-all duration-300"></path>
-                    </svg>
-                    <div class="flex justify-between font-mono text-[10px]">
+                    <div class="flex justify-between font-mono text-[10px] mt-4">
                         <span>TOTAL: <span id="ramTotal">16GB</span></span>
                         <span id="ramUsage">4.2GB</span>
                     </div>
                 </div>
-                <div class="glass-card p-6 flex flex-col justify-between">
+                <div class="glass-card p-6 flex flex-col justify-between h-40 lg:h-48">
                     <span class="text-[10px] orbitron text-gray-500 uppercase">IOPS Pressure</span>
                     <div class="flex flex-col gap-2 pt-4">
                         <div class="h-1 bg-white/5 rounded-full overflow-hidden"><div class="h-full bg-[#00f2ff] w-1/3"></div></div>
-                        <div class="h-1 bg-white/5 rounded-full overflow-hidden"><div class="h-full bg-[#00f2ff] w-2/3"></div></div>
                         <div class="h-1 bg-white/5 rounded-full overflow-hidden"><div class="h-full bg-[#ff2e63] w-1/4"></div></div>
                     </div>
-                    <div class="flex justify-between font-mono text-[10px]">
-                        <span>LATENCY</span>
-                        <span>0.15ms</span>
-                    </div>
-                </div>
-            </div>
-
-            <!-- ENGINE TUNER -->
-            <div class="glass-card p-12 space-y-12" id="tunerCard">
-                <div class="flex justify-between items-center">
-                    <h3 class="orbitron font-bold text-sm tracking-widest">ENGINE TUNER</h3>
-                    <div class="flex items-center gap-4">
-                        <span class="text-[10px] orbitron text-gray-500 uppercase">Autopilot</span>
-                        <div class="w-12 h-6 bg-[#00f2ff]/20 rounded-full p-1 cursor-pointer flex justify-end" id="autopilotToggle">
-                            <div class="w-4 h-4 bg-[#00f2ff] rounded-full shadow-[0_0_10px_#00f2ff]"></div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-16">
-                    <div class="space-y-6">
-                        <div class="flex justify-between text-[10px] orbitron">
-                            <span>WRITER THREADS (SHARDS)</span>
-                            <span id="writerVal">8</span>
-                        </div>
-                        <input type="range" id="writerRange" min="1" max="64" value="8" disabled>
-                        <p class="text-[8px] text-gray-600 uppercase">Optimized for sharded lock-free writing across CPU branches.</p>
-                    </div>
-                    <div class="space-y-6">
-                        <div class="flex justify-between text-[10px] orbitron">
-                            <span>READER PIPELINES</span>
-                            <span id="readerVal">32</span>
-                        </div>
-                        <input type="range" id="readerRange" min="1" max="256" value="32" disabled>
-                        <p class="text-[8px] text-gray-600 uppercase">Scalable snapshot isolation for parallel analytical queries.</p>
-                    </div>
-                </div>
-
-                <div id="saturationWarning" class="hidden p-6 border border-[#ff2e63] bg-[#ff2e63]/5 text-[#ff2e63] orbitron font-bold text-xs text-center animate-pulse">
-                    HARDWARE SATURATION WARNING: Manual configuration exceeds detected VPS capacity! Performance may degrade.
                 </div>
             </div>
 
             <!-- MEMORY COMMAND CENTER -->
-            <div class="glass-card p-12 space-y-8" id="memoryCard">
-                <div class="flex justify-between items-center">
-                    <h3 class="orbitron font-bold text-sm tracking-widest text-[#00f2ff]">MEMORY COMMAND CENTER</h3>
+            <div class="glass-card p-6 lg:p-12 space-y-8" id="memoryCard">
+                <div class="flex flex-col lg:flex-row justify-between lg:items-center gap-4">
+                    <h3 class="orbitron font-bold text-xs lg:text-sm tracking-widest text-[#00f2ff]">MEMORY COMMAND CENTER</h3>
                     <div class="flex items-center gap-4">
                         <span class="text-[10px] orbitron text-gray-500 uppercase">Redis Mode</span>
                         <div onclick="toggleRedis()" class="w-12 h-6 bg-white/10 rounded-full p-1 cursor-pointer transition-all flex" id="redisToggle">
@@ -315,29 +313,22 @@
                     </div>
                 </div>
 
-                <div class="grid grid-cols-1 md:grid-cols-3 gap-12">
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-8 lg:gap-12">
                     <div class="space-y-6">
                         <div class="flex justify-between text-[10px] orbitron">
-                            <span>RAM ALLOCATION LIMIT</span>
+                            <span>RAM LIMIT</span>
                             <span id="ramLimitVal">1024 MB</span>
                         </div>
-                        <input type="range" id="ramLimitRange" min="128" max="16384" step="128" value="1024" oninput="updateRamLimit(this.value)">
-                        <div id="lowMemWarning" class="hidden text-[8px] text-[#ff2e63] orbitron animate-pulse uppercase">LOW MEMORY WARNING: Safe allocation exceeded!</div>
+                        <input type="range" class="w-full h-1 bg-white/10 appearance-none rounded-full" id="ramLimitRange" min="128" max="16384" step="128" value="1024" oninput="updateRamLimit(this.value)">
                     </div>
 
-                    <div class="flex flex-col items-center justify-center space-y-4">
-                        <span class="text-[10px] orbitron text-gray-500 uppercase">Cache Hit Ratio</span>
-                        <div class="relative w-24 h-24">
-                            <svg class="w-full h-full" viewBox="0 0 36 36">
-                                <path class="stroke-current text-white/5" stroke-width="2" fill="none" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
-                                <path id="hitCircle" class="stroke-current text-[#00f2ff]" stroke-width="2" stroke-dasharray="0, 100" fill="none" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
-                            </svg>
-                            <div class="absolute inset-0 flex items-center justify-center text-xs font-bold font-mono" id="hitVal">0%</div>
-                        </div>
+                    <div class="flex flex-col items-center justify-center">
+                        <span class="text-[10px] orbitron text-gray-500 uppercase mb-4">Cache Hit Ratio</span>
+                        <div class="text-2xl font-bold font-mono text-[#00f2ff]" id="hitVal">0%</div>
                     </div>
 
                     <div class="flex items-center">
-                        <button onclick="purgeRAM()" class="w-full py-6 bg-[#ff2e63]/10 border border-[#ff2e63] text-[#ff2e63] orbitron font-bold text-xs uppercase tracking-widest hover:bg-[#ff2e63] hover:text-black transition-all">Purge RAM Cache</button>
+                        <button onclick="purgeRAM()" class="w-full py-4 bg-[#ff2e63]/10 border border-[#ff2e63] text-[#ff2e63] orbitron font-bold text-[10px] uppercase tracking-widest hover:bg-[#ff2e63] hover:text-black transition-all">Purge RAM Cache</button>
                     </div>
                 </div>
             </div>
@@ -345,6 +336,26 @@
     </main>
 
     <script>
+        function getAuth() {
+            const user = document.getElementById('auth_user').value || 'admin';
+            const pass = document.getElementById('auth_pass').value || 'admin';
+            return `${user}:${pass}`;
+        }
+
+        async function apiFetch(url, options = {}) {
+            options.headers = options.headers || {};
+            options.headers['Authorization'] = getAuth();
+            const res = await fetch(url, options);
+            if (res.status === 401) {
+                alert("Unauthorized: Check Security Protocol credentials.");
+            }
+            return res;
+        }
+
+        function toggleSidebar() {
+            document.getElementById('sidebar').classList.toggle('open');
+        }
+
         function showPage(pageId) {
             ['terminal', 'storage', 'monitor'].forEach(p => {
                 document.getElementById(`page-${p}`).classList.add('hidden');
@@ -352,41 +363,47 @@
             });
             document.getElementById(`page-${pageId}`).classList.remove('hidden');
             document.getElementById(`nav-${pageId}`).classList.add('active');
+            if (window.innerWidth < 1024) toggleSidebar();
         }
 
         async function executeSQL() {
             const sql = document.getElementById('sqlInput').value;
             if(!sql) return;
             document.getElementById('resultArea').innerText = ">> PROCESSING JET-BUFFER PIPELINE...";
-            const res = await fetch('/api/query', { method: 'POST', body: sql });
+            const res = await apiFetch('/api/query', { method: 'POST', body: sql });
             const text = await res.text();
             document.getElementById('resultArea').innerText = text;
         }
 
         async function snapshot() { 
-            const res = await fetch('/api/backup'); 
-            const blob = await res.blob();
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a'); a.href = url; a.download = 'ksql_snapshot.ksql'; a.click();
+            const res = await apiFetch('/api/backup'); 
+            if (res.ok) {
+                const blob = await res.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a'); a.href = url; a.download = 'ksql_snapshot.ksql'; a.click();
+            }
         }
 
         async function hotswap() {
             const url = prompt("RESTORE: Enter DB URL module:");
-            if(url) await fetch('/api/hotswap', { method: 'POST', body: JSON.stringify({ url }) });
+            if(url) await apiFetch('/api/hotswap', { method: 'POST', body: JSON.stringify({ url }) });
         }
 
-        async function undo() { await fetch('/api/undo', { method: 'POST' }); }
-        async function redo() { await fetch('/api/redo', { method: 'POST' }); }
+        async function undo() { await apiFetch('/api/undo', { method: 'POST' }); }
+        async function redo() { await apiFetch('/api/redo', { method: 'POST' }); }
 
         async function toggleRedis() {
             const toggle = document.getElementById('redisToggle');
-            const thumb = document.getElementById('redisThumb');
             const isOn = toggle.classList.contains('justify-end');
-            
             const newState = !isOn;
-            await fetch('/api/memory/mode', { method: 'POST', body: JSON.stringify({ turbo: newState }) });
-            
-            if(newState) {
+            await apiFetch('/api/memory/mode', { method: 'POST', body: JSON.stringify({ turbo: newState }) });
+            updateRedisUI(newState);
+        }
+
+        function updateRedisUI(isOn) {
+            const toggle = document.getElementById('redisToggle');
+            const thumb = document.getElementById('redisThumb');
+            if(isOn) {
                 toggle.classList.add('justify-end', 'bg-[#00f2ff]/20');
                 toggle.classList.remove('justify-start', 'bg-white/10');
                 thumb.classList.add('bg-[#00f2ff]', 'shadow-[0_0_10px_#00f2ff]');
@@ -401,16 +418,15 @@
 
         async function updateRamLimit(val) {
             document.getElementById('ramLimitVal').innerText = `${val} MB`;
-            await fetch('/api/memory/limit', { method: 'POST', body: JSON.stringify({ limit_mb: parseInt(val) }) });
+            await apiFetch('/api/memory/limit', { method: 'POST', body: JSON.stringify({ limit_mb: parseInt(val) }) });
         }
 
         async function purgeRAM() {
-            if(confirm("Confirm RAM Purge? Physical .ksql data will be preserved.")) {
-                await fetch('/api/memory/purge', { method: 'POST' });
+            if(confirm("Confirm RAM Purge?")) {
+                await apiFetch('/api/memory/purge', { method: 'POST' });
             }
         }
 
-        // TELEMETRY & WEBSOCKETS (100ms)
         const socket = new WebSocket(`${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`);
         
         socket.onmessage = (event) => {
@@ -422,43 +438,11 @@
                 document.getElementById('ramUsage').innerText = `${data.ram_usage}MB`;
                 document.getElementById('jetBufferSize').innerText = `${data.jet_buffer_mb} MB`;
                 document.getElementById('rpsGauge').innerText = data.rps.toLocaleString();
-                
-                // Memory Tier Updates
                 document.getElementById('hitVal').innerText = `${Math.round(data.cache_hit_ratio)}%`;
-                document.getElementById('hitCircle').style.strokeDasharray = `${data.cache_hit_ratio}, 100`;
-                
-                const lowMem = document.getElementById('lowMemWarning');
-                if(parseInt(document.getElementById('ramLimitRange').value) > data.ram_total * 0.8) {
-                    lowMem.classList.remove('hidden');
-                } else {
-                    lowMem.classList.add('hidden');
-                }
-
-                // Sync Toggle if changed externally
-                const toggle = document.getElementById('redisToggle');
-                const thumb = document.getElementById('redisThumb');
-                if(data.redis_mode && !toggle.classList.contains('justify-end')) {
-                    toggle.classList.add('justify-end', 'bg-[#00f2ff]/20');
-                    thumb.classList.add('bg-[#00f2ff]', 'shadow-[0_0_10px_#00f2ff]');
-                } else if(!data.redis_mode && toggle.classList.contains('justify-end')) {
-                    toggle.classList.remove('justify-end', 'bg-[#00f2ff]/20');
-                    thumb.classList.remove('bg-[#00f2ff]', 'shadow-[0_0_10px_#00f2ff]');
-                }
-
-                // Hardware Saturation Logic
-                const warning = document.getElementById('saturationWarning');
-                const tunerCard = document.getElementById('tunerCard');
-                if(data.is_saturated) {
-                    warning.classList.remove('hidden');
-                    tunerCard.classList.add('saturation-warning');
-                } else {
-                    warning.classList.add('hidden');
-                    tunerCard.classList.remove('saturation-warning');
-                }
+                updateRedisUI(data.redis_mode);
             }
         };
 
-        // UI Helpers
         document.addEventListener('keydown', (e) => {
             if (e.shiftKey && e.key === 'Enter') executeSQL();
         });

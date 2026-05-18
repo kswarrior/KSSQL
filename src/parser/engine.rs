@@ -463,9 +463,11 @@ impl Engine {
 
                 self.state.btree.memory_tier.insert(key.clone(), val_final.clone());
                 self.state.btree.wal.enqueue(WalEntry::RecordUpdate { key, data: val_final })?;
-                self.state.btree.wal.flush_pipeline().await?;
             }
             count += 1;
+        }
+        if !self.active_transactions.contains_key(&conn_id) {
+            self.state.btree.wal.flush_pipeline().await?;
         }
         Ok(format!("Updated {} rows", count))
     }
@@ -520,9 +522,11 @@ impl Engine {
 
                 self.state.btree.memory_tier.insert(key.clone(), val_final.clone());
                 self.state.btree.wal.enqueue(WalEntry::RecordUpdate { key, data: val_final })?;
-                self.state.btree.wal.flush_pipeline().await?;
             }
             count += 1;
+        }
+        if !self.active_transactions.contains_key(&conn_id) {
+            self.state.btree.wal.flush_pipeline().await?;
         }
         Ok(format!("Deleted {} rows", count))
     }
@@ -590,9 +594,7 @@ impl Engine {
                         if idx.table_name == table_name {
                             if let Some(col_val) = row_data.get(&idx.column) {
                                 let idx_key = format!("idx:{}:{}:{}", table_name, idx.column, col_val);
-                                let mut key_id = table_name.as_bytes().to_vec();
-                                key_id.push(b':');
-                                key_id.extend_from_slice(&id.to_le_bytes());
+                            let key_id = format!("{}:{:016x}", table_name, id).into_bytes();
                                 wal_entries.push(WalEntry::RecordUpdate {
                                     key: idx_key.into_bytes(),
                                     data: key_id
@@ -828,6 +830,7 @@ impl Engine {
             if *op == sqlparser::ast::BinaryOperator::Eq {
                 let get_id = |e: &Expr| match e {
                     Expr::Identifier(i) => Some(i.to_string()),
+                    Expr::CompoundIdentifier(parts) => parts.last().map(|p| p.to_string()),
                     _ => None,
                 };
                 let get_val = |e: &Expr| match e {
@@ -838,7 +841,13 @@ impl Engine {
                 if let (Some(col), Some(val)) = (get_id(left).or(get_id(right)), get_val(left).or(get_val(right))) {
                     let idx_key = format!("idx:{}:{}:{}", table_name, col, val);
                     if let Some(target_key) = state.btree.memory_tier.get(idx_key.as_bytes()).or(state.btree.get(idx_key.as_bytes()).await?) {
-                        if let Some(record_data) = state.btree.memory_tier.get(&target_key).or(state.btree.get(&target_key).await?) {
+                        let mut final_key = target_key.clone();
+                        // Handle potential double serialization if key is stored as Vec<u8> in Record
+                        if let Ok(Record { value, .. }) = bincode::deserialize::<Record>(&target_key) {
+                             final_key = value;
+                        }
+
+                        if let Some(record_data) = state.btree.memory_tier.get(&final_key).or(state.btree.get(&final_key).await?) {
                              let record: Record = bincode::deserialize(&record_data)?;
                              if record.version <= version && !record.is_deleted {
                                  let base_data: HashMap<String, String> = bincode::deserialize(&record.value)?;

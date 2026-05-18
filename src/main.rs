@@ -15,6 +15,14 @@ struct Args {
     /// Database file path
     #[arg(long, default_value = "ks_database.ksql")]
     db: String,
+
+    /// Admin username
+    #[arg(long, default_value = "admin")]
+    user: String,
+
+    /// Admin password
+    #[arg(long, default_value = "admin")]
+    password: String,
 }
 
 #[tokio::main]
@@ -51,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
     let wal_path = format!("{}.wal", args.db.strip_suffix(".ksql").unwrap_or(&args.db));
 
     let engine = Engine::new(&args.db, &wal_path).await?;
-    let server = Server::new(engine);
+    let server = Server::new(engine, args.user, args.password);
 
     server.run(main_port, web_port, use_ssl).await?;
 

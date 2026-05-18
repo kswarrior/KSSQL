@@ -1,7 +1,7 @@
+use crate::storage::pager::AlignedBuf;
 use anyhow::Result;
 use crossbeam::queue::ArrayQueue;
 use serde::{Deserialize, Serialize};
-use std::alloc::{alloc, dealloc, Layout};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::Arc;
@@ -84,7 +84,7 @@ impl Wal {
                 let mut opts = std::fs::OpenOptions::new();
                 opts.read(true).write(true).create(true).append(true);
                 #[cfg(target_os = "linux")]
-                opts.custom_flags(0x4000 | 0x1000); // O_DIRECT | O_DSYNC
+                opts.custom_flags(libc::O_DIRECT | libc::O_DSYNC);
 
                 let std_file = opts
                     .open(&path_for_thread)
@@ -106,7 +106,7 @@ impl Wal {
                                 }
                             }
 
-                            let (res, _) = file.write_at(aligned_buf.into_inner(), offset).await;
+                            let (res, _) = file.write_at(aligned_buf, offset).await;
                             if let Ok(n) = res {
                                 offset += n as u64;
                             }
@@ -117,7 +117,7 @@ impl Wal {
         });
 
         Ok(Wal {
-            queue: Arc::new(ArrayQueue::new(20_000_000)),
+            queue: Arc::new(ArrayQueue::new(1_000_000)),
             tx,
             buffer_a: Mutex::new(Vec::with_capacity(128 * 1024 * 1024)),
             buffer_b: Mutex::new(Vec::with_capacity(128 * 1024 * 1024)),
@@ -194,33 +194,5 @@ impl Wal {
 
     pub fn pop_entry(&self) -> Option<WalEntry> {
         self.queue.pop()
-    }
-}
-
-struct AlignedBuf {
-    ptr: *mut u8,
-    layout: Layout,
-    size: usize,
-}
-
-impl AlignedBuf {
-    fn new(size: usize) -> Self {
-        let layout = Layout::from_size_align(size, 4096).unwrap();
-        let ptr = unsafe { alloc(layout) };
-        Self { ptr, layout, size }
-    }
-    fn as_mut_slice(&mut self) -> &mut [u8] {
-        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.size) }
-    }
-    fn into_inner(self) -> Vec<u8> {
-        let v = unsafe { Vec::from_raw_parts(self.ptr, self.size, self.size) };
-        std::mem::forget(self);
-        v
-    }
-}
-
-impl Drop for AlignedBuf {
-    fn drop(&mut self) {
-        unsafe { dealloc(self.ptr, self.layout) };
     }
 }
