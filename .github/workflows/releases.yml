@@ -25,8 +25,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           # If triggered manually, it uses 'manual-build' as the tag
-          tag_name: ${{ github.ref_name || 'manual-build' }}
-          name: Release ${{ github.ref_name || 'Manual Build' }}
+          tag_name: ${{ github.ref_name || '1.0.0' }}
+          name: Release ${{ github.ref_name || '1.0.0' }}
           draft: false
           prerelease: false
           files: |
