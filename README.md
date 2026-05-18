@@ -239,5 +239,4 @@ BEGIN; UPDATE ...; COMMIT;    -- ACID Transactions
 ```
 
 ---
-**Lead Developer:** KS Warrior  
-**Agent:** Jules (V1 Release)
+**Lead Developer:** KS Warrior
