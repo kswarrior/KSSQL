@@ -66,11 +66,26 @@ impl MemoryTier {
     }
 
     fn evict_lru(&self, count: usize) {
-        let mut items: Vec<(Vec<u8>, i64)> = self.lru.iter().map(|r| (r.key().clone(), *r.value())).collect();
-        items.sort_by_key(|k| k.1);
-        for i in 0..count.min(items.len()) {
-            self.cache.remove(&items[i].0);
-            self.lru.remove(&items[i].0);
+        // Optimization: Use a sampling approach to avoid full sort on large caches
+        let mut sample: Vec<(Vec<u8>, i64)> = Vec::with_capacity(count * 3);
+        let mut iter = self.lru.iter();
+
+        // Take a small sample of the cache
+        for _ in 0..(count * 3) {
+            if let Some(r) = iter.next() {
+                sample.push((r.key().clone(), *r.value()));
+            } else {
+                break;
+            }
+        }
+
+        // Sort only the sample
+        sample.sort_by_key(|k| k.1);
+
+        // Evict the oldest items from the sample
+        for i in 0..count.min(sample.len()) {
+            self.cache.remove(&sample[i].0);
+            self.lru.remove(&sample[i].0);
         }
     }
 

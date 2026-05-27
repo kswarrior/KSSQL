@@ -294,7 +294,8 @@ impl Engine {
             }
             Statement::CreateTable { name, columns, .. } => {
                 let auto_increment_col = columns.iter().find(|c| {
-                    c.options.iter().any(|o| {
+                    let type_str = c.data_type.to_string().to_uppercase();
+                    type_str.contains("SERIAL") || c.options.iter().any(|o| {
                         let opt_str = o.to_string().to_uppercase();
                         opt_str.contains("AUTO_INCREMENT") || opt_str.contains("SERIAL")
                     })
@@ -327,9 +328,9 @@ impl Engine {
             Statement::Explain { statement, .. } => {
                 Ok(format!("Execution Plan (Titan-Prime):\n- io_uring I/O\n- O_DIRECT DMA\n- Lock-Free ArrayQueue\n- Ping-Pong Double Buffering\n- Statement: {:?}", statement))
             }
-            Statement::Insert { table_name, source, .. } => {
+            Statement::Insert { table_name, columns, source, .. } => {
                 let source = source.ok_or_else(|| anyhow!("Source missing"))?;
-                self.handle_insert(table_name.to_string(), source, conn_id).await
+                self.handle_insert(table_name.to_string(), columns, source, conn_id).await
             }
             Statement::Query(query) => self.handle_query(*query, conn_id).await,
             Statement::Update { table, assignments, selection, .. } => {
@@ -353,6 +354,16 @@ impl Engine {
     fn evaluate_where(expr: &Expr, row: &HashMap<String, String>) -> bool {
         match expr {
             Expr::BinaryOp { left, op, right } => {
+                match op {
+                    sqlparser::ast::BinaryOperator::And => {
+                        return Self::evaluate_where(left, row) && Self::evaluate_where(right, row);
+                    }
+                    sqlparser::ast::BinaryOperator::Or => {
+                        return Self::evaluate_where(left, row) || Self::evaluate_where(right, row);
+                    }
+                    _ => {}
+                }
+
                 let get_data = |e: &Expr| -> String {
                     match e {
                         Expr::Identifier(ident) => {
@@ -385,17 +396,25 @@ impl Engine {
                 let left_val = get_data(left);
                 let right_val = get_data(right);
 
+                if let (Ok(l_num), Ok(r_num)) = (left_val.parse::<f64>(), right_val.parse::<f64>()) {
+                    return match op {
+                        sqlparser::ast::BinaryOperator::Eq => l_num == r_num,
+                        sqlparser::ast::BinaryOperator::NotEq => l_num != r_num,
+                        sqlparser::ast::BinaryOperator::Gt => l_num > r_num,
+                        sqlparser::ast::BinaryOperator::Lt => l_num < r_num,
+                        sqlparser::ast::BinaryOperator::GtEq => l_num >= r_num,
+                        sqlparser::ast::BinaryOperator::LtEq => l_num <= r_num,
+                        _ => false,
+                    };
+                }
+
                 match op {
-                    sqlparser::ast::BinaryOperator::Eq => {
-                        if left_val.is_empty() && right_val.is_empty() {
-                            false
-                        } else {
-                            left_val == right_val
-                        }
-                    }
+                    sqlparser::ast::BinaryOperator::Eq => left_val == right_val,
                     sqlparser::ast::BinaryOperator::NotEq => left_val != right_val,
                     sqlparser::ast::BinaryOperator::Gt => left_val > right_val,
                     sqlparser::ast::BinaryOperator::Lt => left_val < right_val,
+                    sqlparser::ast::BinaryOperator::GtEq => left_val >= right_val,
+                    sqlparser::ast::BinaryOperator::LtEq => left_val <= right_val,
                     _ => false,
                 }
             }
@@ -535,6 +554,7 @@ impl Engine {
     pub async fn handle_insert(
         &self,
         table_name: String,
+        columns: Vec<sqlparser::ast::Ident>,
         source: Box<Query>,
         conn_id: u32,
     ) -> Result<String> {
@@ -558,15 +578,29 @@ impl Engine {
                     next_id += 1;
                 }
 
-                for (i, expr) in row.iter().enumerate() {
-                    let col_idx = if schema.auto_increment_col.is_some() { i + 1 } else { i };
-                    if col_idx < schema.columns.len() {
-                        let val = match expr {
-                            Expr::Value(Value::Number(n, _)) => n.clone(),
-                            Expr::Value(Value::SingleQuotedString(s)) => s.clone(),
-                            _ => "NULL".to_string(),
-                        };
-                        row_data.insert(schema.columns[col_idx].clone(), val);
+                if columns.is_empty() {
+                    for (i, expr) in row.iter().enumerate() {
+                        let col_idx = if schema.auto_increment_col.is_some() { i + 1 } else { i };
+                        if col_idx < schema.columns.len() {
+                            let val = match expr {
+                                Expr::Value(Value::Number(n, _)) => n.clone(),
+                                Expr::Value(Value::SingleQuotedString(s)) => s.clone(),
+                                _ => "NULL".to_string(),
+                            };
+                            row_data.insert(schema.columns[col_idx].clone(), val);
+                        }
+                    }
+                } else {
+                    for (i, expr) in row.iter().enumerate() {
+                        if i < columns.len() {
+                            let col_name = columns[i].to_string();
+                            let val = match expr {
+                                Expr::Value(Value::Number(n, _)) => n.clone(),
+                                Expr::Value(Value::SingleQuotedString(s)) => s.clone(),
+                                _ => "NULL".to_string(),
+                            };
+                            row_data.insert(col_name, val);
+                        }
                     }
                 }
                 let id = rand::random::<u64>();
@@ -721,6 +755,27 @@ impl Engine {
                 }
             }
 
+            if !query.order_by.is_empty() {
+                left_rows.sort_by(|a, b| {
+                    for ob in &query.order_by {
+                        let col = ob.expr.to_string();
+                        let va = a.get(&col).or(a.keys().find(|k| k.ends_with(&format!(".{}", col))).and_then(|k| a.get(k))).cloned().unwrap_or_default();
+                        let vb = b.get(&col).or(b.keys().find(|k| k.ends_with(&format!(".{}", col))).and_then(|k| b.get(k))).cloned().unwrap_or_default();
+
+                        let cmp = if let (Ok(na), Ok(nb)) = (va.parse::<f64>(), vb.parse::<f64>()) {
+                            na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal)
+                        } else {
+                            va.cmp(&vb)
+                        };
+
+                        if cmp != std::cmp::Ordering::Equal {
+                            return if ob.asc.unwrap_or(true) { cmp } else { cmp.reverse() };
+                        }
+                    }
+                    std::cmp::Ordering::Equal
+                });
+            }
+
             if let Some(limit_expr) = &query.limit {
                 if let Expr::Value(Value::Number(n, _)) = limit_expr {
                     if let Ok(limit) = n.parse::<usize>() {
@@ -792,7 +847,14 @@ impl Engine {
                     if val.is_none() {
                         let parts: Vec<&str> = c.split('.').collect();
                         if parts.len() == 2 {
-                            val = row.get(parts[1]).cloned();
+                            let col_name = parts[1];
+                            val = row.get(col_name).cloned();
+                            if val.is_none() {
+                                // Try case-insensitive fallback
+                                val = row.iter()
+                                    .find(|(k, _)| k.eq_ignore_ascii_case(col_name))
+                                    .map(|(_, v)| v.clone());
+                            }
                         }
                     }
                     vals.push(val.unwrap_or("NULL".to_string()));
