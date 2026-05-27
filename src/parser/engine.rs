@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use sqlparser::ast::{Expr, Query, SetExpr, Statement, TableFactor, Value};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use tokio::sync::Mutex as AsyncMutex;
 use wasmi::*;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -52,6 +53,7 @@ pub struct EngineState {
 pub struct Engine {
     pub state: Arc<EngineState>,
     pub active_transactions: DashMap<u32, Transaction>,
+    pub insert_lock: AsyncMutex<()>,
     pub wasm_engine: wasmi::Engine,
     pub hardware_specs: HardwareSpecs,
     pub autopilot: bool,
@@ -80,6 +82,16 @@ impl Engine {
                 std::sync::atomic::Ordering::SeqCst,
             );
         }
+        // Scan MemoryTier for even newer version from WAL
+        if let Some(data) = btree.memory_tier.get(b"__version__") {
+            if let Ok(record) = bincode::deserialize::<Record>(&data) {
+                if let Ok(v) = bincode::deserialize::<u64>(&record.value) {
+                    if v > current_version.load(std::sync::atomic::Ordering::SeqCst) {
+                        current_version.store(v, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+            }
+        }
 
         let engine_state = Arc::new(EngineState {
             db_path: db_path.to_string(),
@@ -96,12 +108,13 @@ impl Engine {
             tokio_uring::start(async move {
                 loop {
                     let mut entries = Vec::new();
-                    for _ in 0..1000 {
+                    loop {
                         if let Some(entry) = state_for_drain.btree.wal.pop_entry() {
                             entries.push(entry);
                         } else {
                             break;
                         }
+                        if entries.len() >= 1000 { break; }
                     }
 
                     if entries.is_empty() {
@@ -110,8 +123,11 @@ impl Engine {
                     }
 
                     for entry in entries {
-                        if let WalEntry::RecordUpdate { key, data } = entry {
-                            let _ = state_for_drain.btree.insert(key, data).await;
+                        match entry {
+                            WalEntry::RecordUpdate { key, data } => {
+                                let _ = state_for_drain.btree.insert(key, data).await;
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -121,6 +137,7 @@ impl Engine {
         Ok(Engine {
             state: engine_state,
             active_transactions: DashMap::new(),
+            insert_lock: AsyncMutex::new(()),
             wasm_engine: wasmi::Engine::default(),
             hardware_specs,
             autopilot: true,
@@ -174,8 +191,14 @@ impl Engine {
         let sql_upper = sql.trim().to_uppercase();
         if sql_upper == "FLUSH" {
             self.state.btree.wal.flush_pipeline().await?;
-            while self.state.btree.wal.pop_entry().is_some() {} // Wait for drain (simplified)
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            // Wait for background drain to catch up
+            let mut retries = 0;
+            while !self.state.btree.wal.is_empty() && retries < 200 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                retries += 1;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+            self.state.btree.pager.sync().await?;
             return Ok("Flushed".to_string());
         }
         if sql_upper.starts_with("SEARCH") {
@@ -464,8 +487,33 @@ impl Engine {
 
             for assignment in &assignments {
                 let col = assignment.id[0].to_string();
-                let val = assignment.value.to_string().replace("'", "");
-                row_data.insert(col, val);
+                let expr = &assignment.value;
+                let current_val = row_data.get(&col).cloned().unwrap_or_default();
+
+                let new_val = match expr {
+                    Expr::BinaryOp { left, op, right } => {
+                        let l_val = match &**left {
+                            Expr::Identifier(ident) if ident.to_string() == col => current_val.clone(),
+                            _ => left.to_string().replace("'", ""),
+                        };
+                        let r_val = right.to_string().replace("'", "");
+
+                        if let (Ok(ln), Ok(rn)) = (l_val.parse::<f64>(), r_val.parse::<f64>()) {
+                            let res = match op {
+                                sqlparser::ast::BinaryOperator::Plus => ln + rn,
+                                sqlparser::ast::BinaryOperator::Minus => ln - rn,
+                                sqlparser::ast::BinaryOperator::Multiply => ln * rn,
+                                sqlparser::ast::BinaryOperator::Divide => if rn != 0.0 { ln / rn } else { 0.0 },
+                                _ => ln,
+                            };
+                            res.to_string()
+                        } else {
+                            expr.to_string().replace("'", "")
+                        }
+                    }
+                    _ => expr.to_string().replace("'", ""),
+                };
+                row_data.insert(col, new_val);
             }
 
             record.value = bincode::serialize(&row_data)?;
@@ -482,6 +530,17 @@ impl Engine {
 
                 self.state.btree.memory_tier.insert(key.clone(), val_final.clone());
                 self.state.btree.wal.enqueue(WalEntry::RecordUpdate { key, data: val_final })?;
+
+                // Persist system version
+                let version_record = Record {
+                    value: bincode::serialize(&v)?,
+                    version: v,
+                    is_deleted: false,
+                    timestamp: Utc::now().timestamp(),
+                };
+                let vr_bytes = bincode::serialize(&version_record)?;
+                self.state.btree.memory_tier.insert(b"__version__".to_vec(), vr_bytes.clone());
+                self.state.btree.wal.enqueue(WalEntry::RecordUpdate { key: b"__version__".to_vec(), data: vr_bytes })?;
             }
             count += 1;
         }
@@ -541,7 +600,28 @@ impl Engine {
 
                 self.state.btree.memory_tier.insert(key.clone(), val_final.clone());
                 self.state.btree.wal.enqueue(WalEntry::RecordUpdate { key, data: val_final })?;
+
+                // Persist system version
+                let version_record = Record {
+                    value: bincode::serialize(&v)?,
+                    version: v,
+                    is_deleted: false,
+                    timestamp: Utc::now().timestamp(),
+                };
+                let vr_bytes = bincode::serialize(&version_record)?;
+                self.state.btree.memory_tier.insert(b"__version__".to_vec(), vr_bytes.clone());
+                self.state.btree.wal.enqueue(WalEntry::RecordUpdate { key: b"__version__".to_vec(), data: vr_bytes })?;
             }
+                // Persist system version
+                let version_record = Record {
+                    value: bincode::serialize(&version)?,
+                    version,
+                    is_deleted: false,
+                    timestamp: Utc::now().timestamp(),
+                };
+                let vr_bytes = bincode::serialize(&version_record)?;
+                self.state.btree.memory_tier.insert(b"__version__".to_vec(), vr_bytes.clone());
+                self.state.btree.wal.enqueue(WalEntry::RecordUpdate { key: b"__version__".to_vec(), data: vr_bytes })?;
             count += 1;
         }
         if !self.active_transactions.contains_key(&conn_id) {
@@ -558,6 +638,7 @@ impl Engine {
         source: Box<Query>,
         conn_id: u32,
     ) -> Result<String> {
+        let _lock = self.insert_lock.lock().await;
         let schema = self
             .state
             .schemas
@@ -659,6 +740,7 @@ impl Engine {
                     is_deleted: false,
                     timestamp: Utc::now().timestamp(),
                 };
+                self.state.btree.memory_tier.insert(b"__schemas__".to_vec(), bincode::serialize(&record)?);
                 self.state.btree.wal.enqueue(WalEntry::RecordUpdate {
                     key: b"__schemas__".to_vec(),
                     data: bincode::serialize(&record)?
@@ -885,7 +967,7 @@ impl Engine {
     ) -> Result<Vec<HashMap<String, String>>> {
         let prefix = format!("{}:", table_name);
         let mut rows = Vec::new();
-        let mut processed_keys = std::collections::HashSet::new();
+        let mut processed_keys = HashSet::new();
 
         // 0. Check for Index Lookup
         if let Some(Expr::BinaryOp { left, op, right }) = filter {
@@ -964,24 +1046,27 @@ impl Engine {
         loop {
             let page = state.btree.pager.read_page(current_page_id).await?;
             let node = Node::from_bytes(&page)?;
-            for (i, key) in node.keys.iter().enumerate() {
+            let keys = node.keys.clone();
+            let values = node.values.clone();
+            for (i, key) in keys.iter().enumerate() {
                 if processed_keys.contains(key) {
                     continue;
                 }
                 let key_str = String::from_utf8_lossy(key);
                 if key_str.starts_with(&prefix) {
-                    let record: Record = bincode::deserialize(&node.values[i])?;
-                    if record.version <= version && !record.is_deleted {
-                        let base_data: HashMap<String, String> =
-                            bincode::deserialize(&record.value)?;
-                        let mut row_data = HashMap::new();
-                        row_data.insert("__key__".to_string(), key_str.to_string());
-                        for (k, v) in base_data {
-                            row_data.insert(k.clone(), v.clone());
-                            row_data.insert(format!("{}.{}", table_name, k), v);
+                    if let Ok(record) = bincode::deserialize::<Record>(&values[i]) {
+                        if record.version <= version && !record.is_deleted {
+                            if let Ok(base_data) = bincode::deserialize::<HashMap<String, String>>(&record.value) {
+                                let mut row_data = HashMap::new();
+                                row_data.insert("__key__".to_string(), key_str.to_string());
+                                for (k, v) in base_data {
+                                    row_data.insert(k.clone(), v.clone());
+                                    row_data.insert(format!("{}.{}", table_name, k), v);
+                                }
+                                rows.push(row_data);
+                                processed_keys.insert(key.clone());
+                            }
                         }
-                        rows.push(row_data);
-                        processed_keys.insert(key.clone());
                     }
                 }
             }

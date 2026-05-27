@@ -31,11 +31,15 @@ pub enum WalEntry {
 }
 
 pub enum WalRequest {
-    Flush { batch: Vec<u8> },
+    Flush {
+        batch: Vec<u8>,
+        resp: tokio::sync::oneshot::Sender<()>,
+    },
 }
 
 pub struct Wal {
     queue: Arc<ArrayQueue<WalEntry>>,
+    pub drain_queue: Arc<ArrayQueue<WalEntry>>,
     tx: mpsc::Sender<WalRequest>,
     buffer_a: Mutex<Vec<u8>>,
     buffer_b: Mutex<Vec<u8>>,
@@ -59,8 +63,9 @@ impl Wal {
                 while cursor + 4 <= buffer.len() {
                     let len_bytes: [u8; 4] = buffer[cursor..cursor + 4].try_into().unwrap_or([0; 4]);
                     let len = u32::from_le_bytes(len_bytes) as usize;
-                    if len == 0 {
-                        cursor = (cursor / 4096 + 1) * 4096;
+                    if len == 0 || len > 10 * 1024 * 1024 {
+                        cursor = ((cursor + 4095) / 4096) * 4096;
+                        if cursor >= buffer.len() { break; }
                         continue;
                     }
                     cursor += 4;
@@ -70,7 +75,8 @@ impl Wal {
                         }
                         cursor += len;
                     } else {
-                        break;
+                        cursor = ((cursor + 4095) / 4096) * 4096;
+                        if cursor >= buffer.len() { break; }
                     }
                 }
             }
@@ -82,7 +88,7 @@ impl Wal {
         std::thread::spawn(move || {
             tokio_uring::start(async move {
                 let mut opts = std::fs::OpenOptions::new();
-                opts.read(true).write(true).create(true).append(true);
+                opts.read(true).write(true).create(true);
                 #[cfg(target_os = "linux")]
                 opts.custom_flags(libc::O_DIRECT | libc::O_DSYNC);
 
@@ -94,7 +100,7 @@ impl Wal {
 
                 while let Some(req) = rx.recv().await {
                     match req {
-                        WalRequest::Flush { batch } => {
+                        WalRequest::Flush { batch, resp } => {
                             let size = batch.len();
                             let padded_size = (size + 4095) & !4095;
                             let mut aligned_buf = AlignedBuf::new(padded_size);
@@ -107,9 +113,18 @@ impl Wal {
                             }
 
                             let (res, _) = file.write_at(aligned_buf, offset).await;
-                            if let Ok(n) = res {
-                                offset += n as u64;
+                            match res {
+                                Ok(n) => {
+                                    offset += n as u64;
+                                }
+                                Err(e) => {
+                                    eprintln!("[WAL] CRITICAL: Write failed at offset {}: {}", offset, e);
+                                    // Even on error, we should probably move forward or at least not stuck
+                                    offset += padded_size as u64;
+                                }
                             }
+                            let _ = file.sync_all().await;
+                            let _ = resp.send(());
                         }
                     }
                 }
@@ -118,6 +133,7 @@ impl Wal {
 
         Ok(Wal {
             queue: Arc::new(ArrayQueue::new(1_000_000)),
+            drain_queue: Arc::new(ArrayQueue::new(1_000_000)),
             tx,
             buffer_a: Mutex::new(Vec::with_capacity(128 * 1024 * 1024)),
             buffer_b: Mutex::new(Vec::with_capacity(128 * 1024 * 1024)),
@@ -149,11 +165,21 @@ impl Wal {
     }
 
     pub async fn flush_pipeline(&self) -> Result<()> {
+        loop {
+            let q_len = self.queue.len();
+            if q_len == 0 {
+                break;
+            }
+            self.flush_once().await?;
+        }
+        Ok(())
+    }
+
+    async fn flush_once(&self) -> Result<()> {
         let q_len = self.queue.len();
         if q_len == 0 {
             return Ok(());
         }
-
         let is_a = self.active_is_a.load(std::sync::atomic::Ordering::Relaxed);
         let mut active = if is_a {
             self.buffer_a.lock().await
@@ -164,13 +190,17 @@ impl Wal {
         let limit = self.batch_limit.load(std::sync::atomic::Ordering::Relaxed);
         let adaptive_limit = if q_len > 1_000_000 { limit * 4 } else { limit };
 
+        let mut entries_to_drain = Vec::new();
+        let mut count = 0;
         while let Some(entry) = self.queue.pop() {
             if let Ok(encoded) = bincode::serialize(&entry) {
                 let len = encoded.len() as u32;
                 active.extend_from_slice(&len.to_le_bytes());
                 active.extend_from_slice(&encoded);
+                entries_to_drain.push(entry);
+                count += 1;
             }
-            if active.len() >= adaptive_limit {
+            if active.len() >= adaptive_limit || count >= 1000 {
                 break;
             }
         }
@@ -183,8 +213,19 @@ impl Wal {
         self.active_is_a
             .store(!is_a, std::sync::atomic::Ordering::Relaxed);
 
-        let _ = self.tx.send(WalRequest::Flush { batch }).await;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        let _ = self.tx.send(WalRequest::Flush { batch, resp: resp_tx }).await;
+        let _ = resp_rx.await;
+
+        for entry in entries_to_drain {
+            let _ = self.drain_queue.push(entry);
+        }
+
         Ok(())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty() && self.drain_queue.is_empty()
     }
 
     pub async fn read_all(&self) -> Result<Vec<WalEntry>> {
