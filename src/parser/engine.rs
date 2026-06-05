@@ -109,7 +109,7 @@ impl Engine {
                 loop {
                     let mut entries = Vec::new();
                     loop {
-                        if let Some(entry) = state_for_drain.btree.wal.pop_entry() {
+                        if let Some(entry) = state_for_drain.btree.wal.drain_queue.pop() {
                             entries.push(entry);
                         } else {
                             break;
@@ -190,6 +190,7 @@ impl Engine {
     pub async fn execute(&self, sql: &str, conn_id: u32) -> Result<String> {
         let sql_upper = sql.trim().to_uppercase();
         if sql_upper == "FLUSH" {
+            println!("\x1b[38;5;220m[ENGINE]\x1b[0m FLUSH Protocol Initiated by Connection {}", conn_id);
             self.state.btree.wal.flush_pipeline().await?;
             // Wait for background drain to catch up
             let mut retries = 0;
@@ -199,6 +200,7 @@ impl Engine {
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
             self.state.btree.pager.sync().await?;
+            println!("\x1b[38;5;82m[ENGINE]\x1b[0m FLUSH Complete.");
             return Ok("Flushed".to_string());
         }
         if sql_upper.starts_with("SEARCH") {
@@ -612,16 +614,6 @@ impl Engine {
                 self.state.btree.memory_tier.insert(b"__version__".to_vec(), vr_bytes.clone());
                 self.state.btree.wal.enqueue(WalEntry::RecordUpdate { key: b"__version__".to_vec(), data: vr_bytes })?;
             }
-                // Persist system version
-                let version_record = Record {
-                    value: bincode::serialize(&version)?,
-                    version,
-                    is_deleted: false,
-                    timestamp: Utc::now().timestamp(),
-                };
-                let vr_bytes = bincode::serialize(&version_record)?;
-                self.state.btree.memory_tier.insert(b"__version__".to_vec(), vr_bytes.clone());
-                self.state.btree.wal.enqueue(WalEntry::RecordUpdate { key: b"__version__".to_vec(), data: vr_bytes })?;
             count += 1;
         }
         if !self.active_transactions.contains_key(&conn_id) {
@@ -1012,6 +1004,7 @@ impl Engine {
         // 1. Scan MemoryTier first for immediate consistency
         for r in state.btree.memory_tier.cache.iter() {
             let key = r.key();
+            processed_keys.insert(key.clone());
             let key_str = String::from_utf8_lossy(key);
             if key_str.starts_with(&prefix) {
                 let record: Record = bincode::deserialize(r.value())?;
@@ -1024,7 +1017,6 @@ impl Engine {
                         row_data.insert(format!("{}.{}", table_name, k), v);
                     }
                     rows.push(row_data);
-                    processed_keys.insert(key.clone());
                 }
             }
         }
@@ -1049,6 +1041,7 @@ impl Engine {
             let keys = node.keys.clone();
             let values = node.values.clone();
             for (i, key) in keys.iter().enumerate() {
+                if i >= values.len() { break; }
                 if processed_keys.contains(key) {
                     continue;
                 }
