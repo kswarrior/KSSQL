@@ -15,9 +15,10 @@ pub enum NodeType {
 pub struct Node {
     pub node_type: NodeType,
     pub keys: Vec<Vec<u8>>,
-    pub children: Vec<u32>,
+    pub children: Vec<u64>,
     pub values: Vec<Vec<u8>>,
-    pub next_leaf: Option<u32>,
+    pub next_leaf: Option<u64>,
+    pub depth: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -29,37 +30,41 @@ pub struct Record {
 }
 
 impl Node {
-    pub fn new_leaf() -> Self {
+    pub fn new_leaf(depth: u32) -> Self {
         Node {
             node_type: NodeType::Leaf,
             keys: Vec::new(),
             children: Vec::new(),
             values: Vec::new(),
             next_leaf: None,
+            depth,
         }
     }
 
-    pub fn new_internal() -> Self {
+    pub fn new_internal(depth: u32) -> Self {
         Node {
             node_type: NodeType::Internal,
             keys: Vec::new(),
             children: Vec::new(),
             values: Vec::new(),
             next_leaf: None,
+            depth,
         }
     }
 
     pub fn to_bytes(&self) -> Result<[u8; PAGE_SIZE]> {
         let encoded = bincode::serialize(self)?;
         if encoded.len() > PAGE_SIZE - 4 {
-            return Err(anyhow::anyhow!("Node too large for page size"));
+            return Err(anyhow::anyhow!("Node too large for page size: {} bytes", encoded.len()));
         }
         let mut page = [0u8; PAGE_SIZE];
+        // page[0..4] is reserved for checksum in Pager::write_page
         page[4..4 + encoded.len()].copy_from_slice(&encoded);
         Ok(page)
     }
 
     pub fn from_bytes(bytes: &[u8; PAGE_SIZE]) -> Result<Self> {
+        // Pager ensures checksum is valid before we get here
         let node: Node = bincode::deserialize(&bytes[4..])?;
         Ok(node)
     }
@@ -73,7 +78,7 @@ impl Node {
 pub struct BPlusTree {
     pub pager: Arc<Pager>,
     pub wal: Arc<Wal>,
-    pub root_page_id: u32,
+    pub root_page_id: u64,
     pub memory_tier: Arc<MemoryTier>,
 }
 
@@ -102,7 +107,7 @@ impl BPlusTree {
         }
 
         let root_page_id = if pager.num_pages() == 0 {
-            let root = Node::new_leaf();
+            let root = Node::new_leaf(0);
             pager.write_page(0, &root.to_bytes()?).await?;
             pager.sync().await?;
             0
@@ -151,7 +156,7 @@ impl BPlusTree {
         let mut root = Node::from_bytes(&root_bytes)?;
 
         if root.is_full() {
-            let mut new_root = Node::new_internal();
+            let mut new_root = Node::new_internal(root.depth + 1);
             let old_root_id = self.allocate_page().await?;
             self.save_node(old_root_id, &root).await?;
 
@@ -173,7 +178,7 @@ impl BPlusTree {
 
     async fn insert_non_full(
         &self,
-        page_id: u32,
+        page_id: u64,
         node: &mut Node,
         key: Vec<u8>,
         value: Vec<u8>,
@@ -212,12 +217,12 @@ impl BPlusTree {
         Ok(())
     }
 
-    async fn split_child(&self, parent: &mut Node, i: usize, child_id: u32) -> Result<()> {
+    async fn split_child(&self, parent: &mut Node, i: usize, child_id: u64) -> Result<()> {
         let mut child = Node::from_bytes(&self.pager.read_page(child_id).await?)?;
         let mut new_node = if child.node_type == NodeType::Leaf {
-            Node::new_leaf()
+            Node::new_leaf(child.depth)
         } else {
-            Node::new_internal()
+            Node::new_internal(child.depth)
         };
 
         let mid = child.keys.len() / 2;
@@ -248,20 +253,24 @@ impl BPlusTree {
         Ok(())
     }
 
-    async fn allocate_page(&self) -> Result<u32> {
+    async fn allocate_page(&self) -> Result<u64> {
         let id = self.pager.num_pages();
         let blank = [0u8; PAGE_SIZE];
         self.pager.write_page(id, &blank).await?;
         Ok(id)
     }
 
-    pub async fn save_node(&self, page_id: u32, node: &Node) -> Result<()> {
+    pub async fn save_node(&self, page_id: u64, node: &Node) -> Result<()> {
         let bytes = node.to_bytes()?;
         self.wal.enqueue(WalEntry::PageUpdate {
             page_id,
             data: bytes.to_vec(),
         })?;
         self.pager.write_page(page_id, &bytes).await?;
+
+        // Optimized: Immediately update memory tier with priority to keep nodes cached
+        self.memory_tier.insert_with_priority(page_id.to_le_bytes().to_vec(), bytes.to_vec(), node.depth);
+
         Ok(())
     }
 }

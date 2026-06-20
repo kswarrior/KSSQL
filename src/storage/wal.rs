@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, Mutex};
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum WalEntry {
     PageUpdate {
-        page_id: u32,
+        page_id: u64,
         data: Vec<u8>,
     },
     RecordUpdate {

@@ -14,9 +14,15 @@ pub struct MemoryMetrics {
     pub misses: Arc<AtomicU64>,
 }
 
+#[derive(Clone, Copy)]
+pub struct LruEntry {
+    pub timestamp: i64,
+    pub priority: u32,
+}
+
 pub struct MemoryTier {
     pub cache: DashMap<Vec<u8>, Vec<u8>>,
-    pub lru: DashMap<Vec<u8>, i64>,
+    pub lru: DashMap<Vec<u8>, LruEntry>,
     pub metrics: MemoryMetrics,
     pub turbo_mode: Arc<AtomicU64>, // 0 for OFF, 1 for ON
     pub max_ram_mb: Arc<AtomicU64>,
@@ -42,6 +48,12 @@ impl MemoryTier {
                 return Some(val.clone());
             }
             self.metrics.hits.fetch_add(1, Ordering::Relaxed);
+
+            // Update LRU timestamp on access
+            if let Some(mut entry) = self.lru.get_mut(key) {
+                entry.timestamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+            }
+
             Some(val.clone())
         } else {
             if self.turbo_mode.load(Ordering::Relaxed) == 1 {
@@ -53,6 +65,10 @@ impl MemoryTier {
     }
 
     pub fn insert(&self, key: Vec<u8>, value: Vec<u8>) {
+        self.insert_with_priority(key, value, 0);
+    }
+
+    pub fn insert_with_priority(&self, key: Vec<u8>, value: Vec<u8>, priority: u32) {
         let max_bytes = self.max_ram_mb.load(Ordering::Relaxed) * 1024 * 1024;
         let current_entries = self.cache.len();
         let estimated_size = current_entries as u64 * 256;
@@ -61,13 +77,29 @@ impl MemoryTier {
             self.evict_lru(current_entries / 10);
         }
 
-        self.lru.insert(key.clone(), Utc::now().timestamp_nanos_opt().unwrap_or(0));
+        self.lru.insert(key.clone(), LruEntry {
+            timestamp: Utc::now().timestamp_nanos_opt().unwrap_or(0),
+            priority,
+        });
         self.cache.insert(key, value);
     }
 
     fn evict_lru(&self, count: usize) {
-        let mut items: Vec<(Vec<u8>, i64)> = self.lru.iter().map(|r| (r.key().clone(), *r.value())).collect();
-        items.sort_by_key(|k| k.1);
+        // High-performance eviction: Sample a subset of items to avoid O(N) sort of the entire cache
+        let sample_size = (count * 2).max(100).min(self.lru.len());
+        let mut items: Vec<(Vec<u8>, LruEntry)> = self.lru.iter()
+            .take(sample_size)
+            .map(|r| (r.key().clone(), *r.value()))
+            .collect();
+
+        // Sort primarily by priority (depth), then by timestamp (LRU)
+        items.sort_by(|a, b| {
+            match a.1.priority.cmp(&b.1.priority) {
+                std::cmp::Ordering::Equal => a.1.timestamp.cmp(&b.1.timestamp),
+                other => other,
+            }
+        });
+
         for i in 0..count.min(items.len()) {
             self.cache.remove(&items[i].0);
             self.lru.remove(&items[i].0);

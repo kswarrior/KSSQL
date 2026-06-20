@@ -11,8 +11,8 @@ use tokio_uring::buf::{IoBuf, IoBufMut};
 pub const PAGE_SIZE: usize = 4096;
 
 pub enum PagerRequest {
-    Read { page_id: u32, resp: oneshot::Sender<Result<[u8; PAGE_SIZE]>> },
-    Write { page_id: u32, data: [u8; PAGE_SIZE], resp: oneshot::Sender<Result<()>> },
+    Read { page_id: u64, resp: oneshot::Sender<Result<[u8; PAGE_SIZE]>> },
+    Write { page_id: u64, data: [u8; PAGE_SIZE], resp: oneshot::Sender<Result<()>> },
     Sync { resp: oneshot::Sender<Result<()>> },
     Reload { path: std::path::PathBuf, resp: oneshot::Sender<Result<()>> },
 }
@@ -45,7 +45,7 @@ impl Pager {
                 while let Some(req) = rx.recv().await {
                     match req {
                         PagerRequest::Read { page_id, resp } => {
-                            let offset = page_id as u64 * PAGE_SIZE as u64;
+                            let offset = page_id * PAGE_SIZE as u64;
                             let buf = AlignedBuf::new(PAGE_SIZE);
                             let (res, buf_ret) = file.read_at(buf, offset).await;
                             
@@ -64,7 +64,7 @@ impl Pager {
                             }
                         }
                         PagerRequest::Write { page_id, data, resp } => {
-                            let offset = page_id as u64 * PAGE_SIZE as u64;
+                            let offset = page_id * PAGE_SIZE as u64;
                             let mut buf = AlignedBuf::new(PAGE_SIZE);
                             buf.as_mut_slice().copy_from_slice(&data);
                             let (res, _) = file.write_at(buf, offset).await;
@@ -102,7 +102,7 @@ impl Pager {
         })
     }
 
-    pub async fn read_page(&self, page_id: u32) -> Result<[u8; PAGE_SIZE]> {
+    pub async fn read_page(&self, page_id: u64) -> Result<[u8; PAGE_SIZE]> {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(PagerRequest::Read { page_id, resp: tx }).await;
         let page = rx.await??;
@@ -119,7 +119,7 @@ impl Pager {
         Ok(page)
     }
 
-    pub async fn write_page(&self, page_id: u32, page_data: &[u8; PAGE_SIZE]) -> Result<()> {
+    pub async fn write_page(&self, page_id: u64, page_data: &[u8; PAGE_SIZE]) -> Result<()> {
         let mut page = *page_data;
         let mut hasher = Hasher::new();
         hasher.update(&page[4..]);
@@ -130,7 +130,7 @@ impl Pager {
         let _ = self.tx.send(PagerRequest::Write { page_id, data: page, resp: tx }).await;
         rx.await??;
 
-        let offset = page_id as u64 * PAGE_SIZE as u64;
+        let offset = page_id * PAGE_SIZE as u64;
         let current_len = self.file_length.load(Ordering::SeqCst);
         if offset >= current_len {
             self.file_length.store(offset + PAGE_SIZE as u64, Ordering::SeqCst);
@@ -139,9 +139,9 @@ impl Pager {
         Ok(())
     }
 
-    pub fn num_pages(&self) -> u32 {
+    pub fn num_pages(&self) -> u64 {
         let len = self.file_length.load(Ordering::SeqCst);
-        (len / PAGE_SIZE as u64) as u32
+        len / PAGE_SIZE as u64
     }
     
     pub async fn sync(&self) -> Result<()> {
