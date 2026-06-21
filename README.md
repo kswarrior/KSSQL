@@ -1,20 +1,20 @@
 # KS SQL (Titan-Prime Evolution - Ultra-Scale)
 
-**KS SQL** is an ultra-high performance, standalone RDBMS engine built in Rust, engineered to bypass traditional OS bottlenecks and achieve raw hardware throughput. We are currently evolving into the **Titan-Prime Evolution** architecture, a distributed, multi-process engine capable of managing **5,000,000,000,000 (5 Trillion)** rows.
+**KS SQL** is an ultra-high performance, standalone RDBMS engine built in Rust, engineered to bypass traditional OS bottlenecks and achieve raw hardware throughput. This is the **Titan-Prime Evolution (V1.1.0)** architecture, a distributed, multi-process engine designed for **5,000,000,000,000 (5 Trillion)** rows.
 
 ## 🚀 Titan-Prime Evolution Features
 
 -   **Multi-Process Isolation:** Decoupled architecture into `ks-core` (Storage), `ks-worker` (WASM Sandbox), and `ks-dash` (Dashboard) to eliminate monolithic blast radiuses.
--   **Log-Structured Foundations:** Transitioning toward a hybrid LSM-Tree model for ultra-scale write optimization and sparse indexing.
--   **Deterministic Scheduling:** A high-concurrency sequencing layer designed to smash the OCC collision wall under extreme write contention.
--   **Portability Abstract Layer (PAL):** Unified I/O trait system supporting `io_uring` (Linux), `kqueue` (macOS), and `IOCP` (Windows).
--   **Tiered Memory Management:** Strict segmentation of RAM into **Turbo Cache** (KV) and **Index Cache** (SSTable/Metadata) pools with unbiased random sampling.
+-   **High-Performance PAL:** A Portability Abstract Layer that dynamically selects between `io_uring` (Linux) and standard asynchronous I/O, optimized for persistent handle reuse.
+-   **Log-Structured Foundations:** Integrated **SkipList MemTable** as the first step toward a hybrid LSM-Tree model for ultra-scale write optimization.
+-   **Deterministic Sequencing:** A high-concurrency sequencing layer integrated into the Engine to smash the OCC collision wall.
+-   **Tiered Memory Management:** RAM segmentation into **Turbo Cache** (KV) and **Index Cache** (Routing/Metadata) with unbiased random sampling.
 -   **64-Bit Memory Mapping:** Native `u64` addressing across all internal identity tracking and slot allocations.
 
 ## 🔥 Ultimate Enterprise Capabilities
 
 -   **High-Performance Memory Tier:** Integrated lock-free cache achieving over **7.5 Million operations/sec**.
--   **Truly Asynchronous I/O:** Powered by `io_uring` on Linux for zero-syscall overhead and DMA-based NVMe streaming.
+-   **Truly Asynchronous I/O:** Powered by a dedicated `io_uring` thread for zero-syscall overhead and DMA-based NVMe streaming.
 -   **Snapshot Isolation (MVCC):** Lock-free readers and automated deterministic conflict resolution for writers.
 -   **Universal SQL Support:** ANSI SQL integration via `sqlparser` with advanced indexing and aggregates.
 
@@ -22,7 +22,7 @@
 
 Benchmarks on Titan-optimized hardware:
 -   **Memory Read Speed:** **~7.5 Million ops/sec** (Redis Mode / Tiered Turbo Cache).
--   **Burst Ingestion:** **Ultra-Scale** asynchronous write pipeline with 5,000-entry batching.
+-   **Burst Ingestion:** **~66,000 Rows/sec** (Persistent write to NVMe with batching).
 -   **Index Lookups:** **Sub-millisecond** (O(1) access with prioritized Index Caching).
 -   **Addressing Capacity:** **5 Trillion Rows** (Native 64-bit addressing).
 
@@ -47,7 +47,7 @@ Binaries will be available at:
 
 ## 🖥️ Usage
 
-Start the core engine:
+Start the core engine (which automatically spawns workers):
 
 ```bash
 ./target/release/ks-core --port w:8080 m:5432 --db ks_database.ksql

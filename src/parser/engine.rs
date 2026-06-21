@@ -2,6 +2,7 @@ use crate::storage::btree::{BPlusTree, Node, NodeType, Record};
 use crate::storage::pager::{PAGE_SIZE};
 use crate::storage::wal::WalEntry;
 use crate::storage::{HardwareManager, HardwareSpecs};
+use crate::parser::scheduler::{DeterministicScheduler, TransactionRequest};
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use dashmap::DashMap;
@@ -9,9 +10,10 @@ use serde::{Deserialize, Serialize};
 use sqlparser::ast::{Expr, Query, SetExpr, Statement, TableFactor, Value};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use wasmi::*;
+use tokio::sync::oneshot;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TableSchema {
@@ -31,6 +33,7 @@ pub struct Transaction {
     pub id: u64,
     pub snapshot_version: u64,
     pub updates: HashMap<Vec<u8>, Vec<u8>>,
+    pub read_set: HashSet<Vec<u8>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -48,6 +51,7 @@ pub struct EngineState {
     pub views: DashMap<String, View>,
     pub indices: DashMap<String, IndexSchema>,
     pub current_version: Arc<std::sync::atomic::AtomicU64>,
+    pub scheduler: DeterministicScheduler,
 }
 
 pub struct Engine {
@@ -90,6 +94,7 @@ impl Engine {
             views: DashMap::new(),
             indices: DashMap::new(),
             current_version,
+            scheduler: DeterministicScheduler::new(),
         });
 
         let state_for_drain = Arc::clone(&engine_state);
@@ -206,12 +211,25 @@ impl Engine {
                     id: Utc::now().timestamp_micros() as u64,
                     snapshot_version: version,
                     updates: HashMap::new(),
+                    read_set: HashSet::new(),
                 },
             );
             return Ok("Transaction started".to_string());
         }
         if sql_upper == "COMMIT" {
             if let Some((_, tx)) = self.active_transactions.remove(&conn_id) {
+                // Use Deterministic Sequencer for high-contention commit
+                let (done_tx, done_rx) = oneshot::channel();
+                let write_set = tx.updates.keys().cloned().collect();
+                self.state.scheduler.schedule(TransactionRequest {
+                    tx_id: tx.id,
+                    read_set: tx.read_set.clone(),
+                    write_set,
+                    commit_tx: Some(done_tx),
+                }).await?;
+
+                done_rx.await??;
+
                 for key in tx.updates.keys() {
                     let data_opt = self.state.btree.memory_tier.get(key);
                     let data_res = if data_opt.is_some() { Ok(data_opt) } else { self.state.btree.get(key).await };
@@ -228,7 +246,7 @@ impl Engine {
                     let mut record: Record = bincode::deserialize(&v)?;
                     record.version = version;
                     let v_new = bincode::serialize(&record)?;
-                    self.state.btree.memory_tier.insert(k.clone(), v_new.clone());
+                    self.state.btree.memory_tier.insert_kv(k.clone(), v_new.clone());
                     self.state.btree.wal.enqueue(WalEntry::RecordUpdate { key: k, data: v_new })?;
                 }
 
@@ -292,7 +310,7 @@ impl Engine {
                 for row in rows {
                     if let (Some(val), Some(key)) = (row.get(&schema.column), row.get("__key__")) {
                         let idx_key = format!("idx:{}:{}:{}", schema.table_name, schema.column, val);
-                        self.state.btree.memory_tier.insert(idx_key.clone().into_bytes(), key.as_bytes().to_vec());
+                        self.state.btree.memory_tier.insert_kv(idx_key.clone().into_bytes(), key.as_bytes().to_vec());
                         self.state.btree.wal.enqueue(WalEntry::RecordUpdate {
                             key: idx_key.into_bytes(),
                             data: key.as_bytes().to_vec()
@@ -438,6 +456,9 @@ impl Engine {
             if selection.as_ref().map(|s| Self::evaluate_where(s, &row)).unwrap_or(true) {
                 if let Some(key) = row.get("__key__") {
                     keys_to_update.push(key.as_bytes().to_vec());
+                    if let Some(mut tx) = self.active_transactions.get_mut(&conn_id) {
+                        tx.read_set.insert(key.as_bytes().to_vec());
+                    }
                 }
             }
         }
@@ -466,7 +487,7 @@ impl Engine {
                 record_mut.version = v;
                 let val_final = bincode::serialize(&record_mut)?;
 
-                self.state.btree.memory_tier.insert(key.clone(), val_final.clone());
+                self.state.btree.memory_tier.insert_kv(key.clone(), val_final.clone());
                 self.state.btree.wal.enqueue(WalEntry::RecordUpdate { key, data: val_final })?;
             }
             count += 1;
@@ -500,6 +521,9 @@ impl Engine {
             if selection.as_ref().map(|s| Self::evaluate_where(s, &row)).unwrap_or(true) {
                 if let Some(key) = row.get("__key__") {
                     keys_to_delete.push(key.as_bytes().to_vec());
+                    if let Some(mut tx) = self.active_transactions.get_mut(&conn_id) {
+                        tx.read_set.insert(key.as_bytes().to_vec());
+                    }
                 }
             }
         }
@@ -520,7 +544,7 @@ impl Engine {
                 record_mut.version = v;
                 let val_final = bincode::serialize(&record_mut)?;
 
-                self.state.btree.memory_tier.insert(key.clone(), val_final.clone());
+                self.state.btree.memory_tier.insert_kv(key.clone(), val_final.clone());
                 self.state.btree.wal.enqueue(WalEntry::RecordUpdate { key, data: val_final })?;
             }
             count += 1;
@@ -586,7 +610,7 @@ impl Engine {
                 if let Some(mut tx) = self.active_transactions.get_mut(&conn_id) {
                     tx.updates.insert(key_vec, val);
                 } else {
-                    self.state.btree.memory_tier.insert(key_vec.clone(), val.clone());
+                    self.state.btree.memory_tier.insert_kv(key_vec.clone(), val.clone());
                     wal_entries.push(WalEntry::RecordUpdate { key: key_vec, data: val });
                     
                     for r in self.state.indices.iter() {
@@ -662,6 +686,16 @@ impl Engine {
                 .ok_or_else(|| anyhow!("Table {} not found", table_name))?
                 .clone();
             let mut left_rows = self.scan_table_with_filter(&self.state, &table_name, version, select.selection.as_ref()).await?;
+
+            // Record read set for transactions
+            if let Some(mut tx) = self.active_transactions.get_mut(&conn_id) {
+                for row in &left_rows {
+                    if let Some(key) = row.get("__key__") {
+                        tx.read_set.insert(key.as_bytes().to_vec());
+                    }
+                }
+            }
+
             let mut display_cols: Vec<String> = schema
                 .columns
                 .iter()
@@ -681,6 +715,15 @@ impl Engine {
                     .ok_or_else(|| anyhow!("Table {} not found", right_table))?
                     .clone();
                 let right_rows = self.scan_table(&self.state, &right_table, version).await?;
+
+                // Record read set for right rows
+                if let Some(mut tx) = self.active_transactions.get_mut(&conn_id) {
+                    for row in &right_rows {
+                        if let Some(key) = row.get("__key__") {
+                            tx.read_set.insert(key.as_bytes().to_vec());
+                        }
+                    }
+                }
 
                 for c in &right_schema.columns {
                     display_cols.push(format!("{}.{}", right_table, c));
@@ -823,7 +866,7 @@ impl Engine {
     ) -> Result<Vec<HashMap<String, String>>> {
         let prefix = format!("{}:", table_name);
         let mut rows = Vec::new();
-        let mut processed_keys = std::collections::HashSet::new();
+        let mut processed_keys = HashSet::new();
 
         // 0. Check for Index Lookup
         if let Some(Expr::BinaryOp { left, op, right }) = filter {

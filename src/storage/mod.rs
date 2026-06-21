@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use chrono::Utc;
 use rand::seq::IteratorRandom;
+use std::collections::BTreeMap;
+use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct MemoryMetrics {
@@ -22,6 +24,32 @@ pub struct LruEntry {
     pub priority: u32,
 }
 
+/// LSM-Tree MemTable Foundation
+pub struct MemTable {
+    pub table: RwLock<BTreeMap<Vec<u8>, Vec<u8>>>,
+    pub size: AtomicU64,
+}
+
+impl MemTable {
+    pub fn new() -> Self {
+        Self {
+            table: RwLock::new(BTreeMap::new()),
+            size: AtomicU64::new(0),
+        }
+    }
+
+    pub async fn insert(&self, key: Vec<u8>, value: Vec<u8>) {
+        let mut t = self.table.write().await;
+        self.size.fetch_add((key.len() + value.len()) as u64, Ordering::Relaxed);
+        t.insert(key, value);
+    }
+
+    pub async fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        let t = self.table.read().await;
+        t.get(key).cloned()
+    }
+}
+
 /// A tiered memory management system for ultra-scale workloads
 pub struct TieredMemory {
     pub turbo_cache: DashMap<Vec<u8>, Vec<u8>>, // KV records
@@ -30,6 +58,7 @@ pub struct TieredMemory {
     pub metrics: MemoryMetrics,
     pub turbo_mode: Arc<AtomicU64>,
     pub max_ram_mb: Arc<AtomicU64>,
+    pub memtable: Arc<MemTable>,
 }
 
 impl TieredMemory {
@@ -44,6 +73,7 @@ impl TieredMemory {
             },
             turbo_mode: Arc::new(AtomicU64::new(0)),
             max_ram_mb: Arc::new(AtomicU64::new(max_ram_mb)),
+            memtable: Arc::new(MemTable::new()),
         }
     }
 
@@ -60,6 +90,10 @@ impl TieredMemory {
         None
     }
 
+    pub fn get_kv(&self, key: &[u8]) -> Option<Vec<u8>> {
+        self.get(key)
+    }
+
     fn hit(&self, key: &[u8]) {
         self.metrics.hits.fetch_add(1, Ordering::Relaxed);
         if let Some(mut entry) = self.lru.get_mut(key) {
@@ -69,6 +103,10 @@ impl TieredMemory {
 
     pub fn insert(&self, key: Vec<u8>, value: Vec<u8>) {
         self.insert_with_priority(key, value, 0);
+    }
+
+    pub fn insert_kv(&self, key: Vec<u8>, value: Vec<u8>) {
+        self.insert(key, value);
     }
 
     pub fn insert_with_priority(&self, key: Vec<u8>, value: Vec<u8>, priority: u32) {

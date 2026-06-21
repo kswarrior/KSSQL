@@ -1,26 +1,20 @@
 use clap::Parser;
 use ks_sql::network::server::Server;
 use ks_sql::parser::engine::Engine;
+use std::process::Command;
 
 #[derive(Parser, Debug)]
-#[command(name = "ks-sql")]
+#[command(name = "ks-core")]
 #[command(author = "KS Warrior")]
-#[command(version = "1.0.0")]
-#[command(about = "Ultimate Enterprise RDBMS Engine", long_about = None)]
+#[command(version = "1.1.0")]
+#[command(about = "Ultra-Scale Core Storage Engine", long_about = None)]
 struct Args {
-    /// Port configurations (e.g., w:8080 m:5432)
     #[arg(long, num_args = 1..)]
     port: Vec<String>,
-
-    /// Database file path
     #[arg(long, default_value = "ks_database.ksql")]
     db: String,
-
-    /// Admin username
     #[arg(long, default_value = "admin")]
     user: String,
-
-    /// Admin password
     #[arg(long, default_value = "admin")]
     password: String,
 }
@@ -45,19 +39,14 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let banner = r#"
-    __  ___  ____   ____   ____   _
-   / / / / |/ / /  / __ \ / __ \ / /
-  / /_/ /|   / /  / / / // / / // /
- / __  //   / /__/ /_/ // /_/ // /___
-/_/ /_//_/|_\___/\____/ \____//_____/
-    "#;
-    println!("\x1b[38;5;45m{}\x1b[0m", banner);
-    println!("\x1b[38;5;198m[CORE]\x1b[0m Initializing Titan-Prime Runtime...");
-    println!("\x1b[38;5;198m[DATA]\x1b[0m Persistence Layer: \x1b[38;5;220m{}\x1b[0m", args.db);
+    println!("\x1b[38;5;45mInitializing Titan-Prime Evolution Core...\x1b[0m");
+
+    // Spawn Worker Process
+    let mut _worker = Command::new("./target/debug/ks-worker")
+        .spawn()
+        .expect("Failed to start ks-worker process");
 
     let wal_path = format!("{}.wal", args.db.strip_suffix(".ksql").unwrap_or(&args.db));
-
     let engine = Engine::new(&args.db, &wal_path).await?;
     let server = Server::new(engine, args.user, args.password);
 
