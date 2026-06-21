@@ -7,6 +7,7 @@ use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use chrono::Utc;
+use rand::seq::IteratorRandom;
 
 #[derive(Clone)]
 pub struct MemoryMetrics {
@@ -85,10 +86,14 @@ impl MemoryTier {
     }
 
     fn evict_lru(&self, count: usize) {
-        // High-performance eviction: Sample a subset of items to avoid O(N) sort of the entire cache
-        let sample_size = (count * 2).max(100).min(self.lru.len());
+        // High-performance eviction: Sample randomly from the DashMap to avoid shard-biased iteration
+        let mut rng = rand::thread_rng();
+        let sample_size = (count * 3).max(100).min(self.lru.len());
+
+        // Using choose_multiple for true random sampling to eliminate shard bias
         let mut items: Vec<(Vec<u8>, LruEntry)> = self.lru.iter()
-            .take(sample_size)
+            .choose_multiple(&mut rng, sample_size)
+            .into_iter()
             .map(|r| (r.key().clone(), *r.value()))
             .collect();
 

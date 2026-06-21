@@ -129,7 +129,7 @@ impl BPlusTree {
         }
         let mut current_page_id = self.root_page_id;
         loop {
-            let node = Node::from_bytes(&self.pager.read_page(current_page_id).await?)?;
+            let node = self.read_node(current_page_id).await?;
             match node.node_type {
                 NodeType::Leaf => {
                     return match node.keys.binary_search(&key.to_vec()) {
@@ -152,8 +152,7 @@ impl BPlusTree {
     }
 
     pub async fn insert(&self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
-        let root_bytes = self.pager.read_page(self.root_page_id).await?;
-        let mut root = Node::from_bytes(&root_bytes)?;
+        let root = self.read_node(self.root_page_id).await?;
 
         if root.is_full() {
             let mut new_root = Node::new_internal(root.depth + 1);
@@ -164,11 +163,11 @@ impl BPlusTree {
             self.split_child(&mut new_root, 0, old_root_id).await?;
             self.save_node(self.root_page_id, &new_root).await?;
 
-            let root_bytes = self.pager.read_page(self.root_page_id).await?;
-            root = Node::from_bytes(&root_bytes)?;
+            let mut root = self.read_node(self.root_page_id).await?;
             self.insert_non_full(self.root_page_id, &mut root, key, value)
                 .await?;
         } else {
+            let mut root = root;
             self.insert_non_full(self.root_page_id, &mut root, key, value)
                 .await?;
         }
@@ -201,7 +200,7 @@ impl BPlusTree {
                 i = node.children.len() - 1;
             }
             let mut child_id = node.children[i];
-            let mut child = Node::from_bytes(&self.pager.read_page(child_id).await?)?;
+            let mut child = self.read_node(child_id).await?;
 
             if child.is_full() {
                 self.split_child(node, i, child_id).await?;
@@ -209,7 +208,7 @@ impl BPlusTree {
                     i += 1;
                 }
                 child_id = node.children[i];
-                child = Node::from_bytes(&self.pager.read_page(child_id).await?)?;
+                child = self.read_node(child_id).await?;
             }
             Box::pin(self.insert_non_full(child_id, &mut child, key, value)).await?;
             self.save_node(page_id, node).await?;
@@ -218,7 +217,7 @@ impl BPlusTree {
     }
 
     async fn split_child(&self, parent: &mut Node, i: usize, child_id: u64) -> Result<()> {
-        let mut child = Node::from_bytes(&self.pager.read_page(child_id).await?)?;
+        let mut child = self.read_node(child_id).await?;
         let mut new_node = if child.node_type == NodeType::Leaf {
             Node::new_leaf(child.depth)
         } else {
@@ -260,6 +259,23 @@ impl BPlusTree {
         Ok(id)
     }
 
+    pub async fn read_node(&self, page_id: u64) -> Result<Node> {
+        let mut cache_key = vec![0u8; 9];
+        cache_key[0] = 0xFF; // Non-printable prefix for page namespacing
+        cache_key[1..9].copy_from_slice(&page_id.to_le_bytes());
+
+        if let Some(data) = self.memory_tier.get(&cache_key) {
+             if let Ok(node) = Node::from_bytes(data.as_slice().try_into().unwrap_or(&[0u8; PAGE_SIZE])) {
+                 return Ok(node);
+             }
+        }
+        let bytes = self.pager.read_page(page_id).await?;
+        let node = Node::from_bytes(&bytes)?;
+        // Populate cache on read
+        self.memory_tier.insert_with_priority(cache_key, bytes.to_vec(), node.depth);
+        Ok(node)
+    }
+
     pub async fn save_node(&self, page_id: u64, node: &Node) -> Result<()> {
         let bytes = node.to_bytes()?;
         self.wal.enqueue(WalEntry::PageUpdate {
@@ -268,8 +284,12 @@ impl BPlusTree {
         })?;
         self.pager.write_page(page_id, &bytes).await?;
 
-        // Optimized: Immediately update memory tier with priority to keep nodes cached
-        self.memory_tier.insert_with_priority(page_id.to_le_bytes().to_vec(), bytes.to_vec(), node.depth);
+        // Use binary namespaced key to prevent collisions with user records
+        let mut cache_key = vec![0u8; 9];
+        cache_key[0] = 0xFF; // Non-printable prefix
+        cache_key[1..9].copy_from_slice(&page_id.to_le_bytes());
+
+        self.memory_tier.insert_with_priority(cache_key, bytes.to_vec(), node.depth);
 
         Ok(())
     }
