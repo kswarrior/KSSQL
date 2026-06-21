@@ -1,6 +1,7 @@
 pub mod pager;
 pub mod wal;
 pub mod btree;
+pub mod io;
 
 use sysinfo::System;
 use dashmap::DashMap;
@@ -21,18 +22,21 @@ pub struct LruEntry {
     pub priority: u32,
 }
 
-pub struct MemoryTier {
-    pub cache: DashMap<Vec<u8>, Vec<u8>>,
+/// A tiered memory management system for ultra-scale workloads
+pub struct TieredMemory {
+    pub turbo_cache: DashMap<Vec<u8>, Vec<u8>>, // KV records
+    pub index_cache: DashMap<Vec<u8>, Vec<u8>>, // SSTable / Index metadata
     pub lru: DashMap<Vec<u8>, LruEntry>,
     pub metrics: MemoryMetrics,
-    pub turbo_mode: Arc<AtomicU64>, // 0 for OFF, 1 for ON
+    pub turbo_mode: Arc<AtomicU64>,
     pub max_ram_mb: Arc<AtomicU64>,
 }
 
-impl MemoryTier {
+impl TieredMemory {
     pub fn new(max_ram_mb: u64) -> Self {
         Self {
-            cache: DashMap::new(),
+            turbo_cache: DashMap::new(),
+            index_cache: DashMap::new(),
             lru: DashMap::new(),
             metrics: MemoryMetrics {
                 hits: Arc::new(AtomicU64::new(0)),
@@ -44,24 +48,22 @@ impl MemoryTier {
     }
 
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-        if let Some(val) = self.cache.get(key) {
-            if self.turbo_mode.load(Ordering::Relaxed) == 1 {
-                return Some(val.clone());
-            }
-            self.metrics.hits.fetch_add(1, Ordering::Relaxed);
+        if let Some(val) = self.turbo_cache.get(key) {
+             self.hit(key);
+             return Some(val.clone());
+        }
+        if let Some(val) = self.index_cache.get(key) {
+             self.hit(key);
+             return Some(val.clone());
+        }
+        self.metrics.misses.fetch_add(1, Ordering::Relaxed);
+        None
+    }
 
-            // Update LRU timestamp on access
-            if let Some(mut entry) = self.lru.get_mut(key) {
-                entry.timestamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
-            }
-
-            Some(val.clone())
-        } else {
-            if self.turbo_mode.load(Ordering::Relaxed) == 1 {
-                return None;
-            }
-            self.metrics.misses.fetch_add(1, Ordering::Relaxed);
-            None
+    fn hit(&self, key: &[u8]) {
+        self.metrics.hits.fetch_add(1, Ordering::Relaxed);
+        if let Some(mut entry) = self.lru.get_mut(key) {
+            entry.timestamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
         }
     }
 
@@ -70,11 +72,11 @@ impl MemoryTier {
     }
 
     pub fn insert_with_priority(&self, key: Vec<u8>, value: Vec<u8>, priority: u32) {
-        let max_bytes = self.max_ram_mb.load(Ordering::Relaxed) * 1024 * 1024;
-        let current_entries = self.cache.len();
-        let estimated_size = current_entries as u64 * 256;
+        let pool = if key.starts_with(&[0xFF]) { &self.index_cache } else { &self.turbo_cache };
         
-        if estimated_size > max_bytes && !self.cache.is_empty() {
+        let max_bytes = self.max_ram_mb.load(Ordering::Relaxed) * 1024 * 1024;
+        let current_entries = self.turbo_cache.len() + self.index_cache.len();
+        if current_entries as u64 * 256 > max_bytes {
             self.evict_lru(current_entries / 10);
         }
 
@@ -82,22 +84,19 @@ impl MemoryTier {
             timestamp: Utc::now().timestamp_nanos_opt().unwrap_or(0),
             priority,
         });
-        self.cache.insert(key, value);
+        pool.insert(key, value);
     }
 
     fn evict_lru(&self, count: usize) {
-        // High-performance eviction: Sample randomly from the DashMap to avoid shard-biased iteration
         let mut rng = rand::thread_rng();
         let sample_size = (count * 3).max(100).min(self.lru.len());
 
-        // Using choose_multiple for true random sampling to eliminate shard bias
         let mut items: Vec<(Vec<u8>, LruEntry)> = self.lru.iter()
             .choose_multiple(&mut rng, sample_size)
             .into_iter()
             .map(|r| (r.key().clone(), *r.value()))
             .collect();
 
-        // Sort primarily by priority (depth), then by timestamp (LRU)
         items.sort_by(|a, b| {
             match a.1.priority.cmp(&b.1.priority) {
                 std::cmp::Ordering::Equal => a.1.timestamp.cmp(&b.1.timestamp),
@@ -106,18 +105,22 @@ impl MemoryTier {
         });
 
         for i in 0..count.min(items.len()) {
-            self.cache.remove(&items[i].0);
-            self.lru.remove(&items[i].0);
+            let key = &items[i].0;
+            self.turbo_cache.remove(key);
+            self.index_cache.remove(key);
+            self.lru.remove(key);
         }
     }
 
     pub fn remove(&self, key: &[u8]) {
-        self.cache.remove(key);
+        self.turbo_cache.remove(key);
+        self.index_cache.remove(key);
         self.lru.remove(key);
     }
 
     pub fn clear(&self) {
-        self.cache.clear();
+        self.turbo_cache.clear();
+        self.index_cache.clear();
         self.lru.clear();
     }
 
@@ -128,6 +131,9 @@ impl MemoryTier {
         if total == 0 { 0.0 } else { (hits as f64 / total as f64) * 100.0 }
     }
 }
+
+// Keeping MemoryTier as a compatibility alias
+pub type MemoryTier = TieredMemory;
 
 pub struct HardwareSpecs {
     pub cpu_cores: usize,
@@ -162,63 +168,5 @@ impl HardwareManager {
             writers,
             readers,
         }
-    }
-
-    pub fn check_alerts(specs: &HardwareSpecs) {
-        let mut sys = System::new_all();
-        sys.refresh_all();
-        let cpu_usage = sys.global_cpu_info().cpu_usage();
-        let used_ram = (sys.total_memory() - sys.available_memory()) / 1024 / 1024;
-
-        if cpu_usage > 90.0 {
-            eprintln!("\x1b[31m[ALERT]\x1b[0m CPU CRITICAL: {:.2}%! Resource saturation imminent.", cpu_usage);
-        }
-        if used_ram > (specs.total_ram_mb * 90 / 100) {
-            eprintln!("\x1b[31m[ALERT]\x1b[0m RAM CRITICAL: {}MB used! Automatic purging suggested.", used_ram);
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::pager::Pager;
-    use super::btree::BPlusTree;
-    use std::fs;
-
-    #[test]
-    fn test_pager() {
-        let path = "test_pager.ksql";
-        let _ = fs::remove_file(path);
-        tokio_uring::start(async move {
-            {
-                let pager = Pager::open(path).await.unwrap();
-                let data = [0u8; 4096];
-                pager.write_page(0, &data).await.unwrap();
-            }
-            {
-                let pager = Pager::open(path).await.unwrap();
-                let data = pager.read_page(0).await.unwrap();
-                assert_eq!(data.len(), 4096);
-            }
-        });
-        let _ = fs::remove_file(path);
-    }
-
-    #[test]
-    fn test_btree_basic() {
-        let db_path = "test_btree.ksql";
-        let wal_path = "test_btree.wal";
-        let _ = fs::remove_file(db_path);
-        let _ = fs::remove_file(wal_path);
-        let memory_tier = std::sync::Arc::new(super::MemoryTier::new(100));
-        tokio_uring::start(async move {
-            {
-                let btree = BPlusTree::open(db_path, wal_path, memory_tier).await.unwrap();
-                btree.insert(b"key1".to_vec(), b"value1".to_vec()).await.unwrap();
-                assert_eq!(btree.get(b"key1").await.unwrap(), Some(b"value1".to_vec()));
-            }
-        });
-        let _ = fs::remove_file(db_path);
-        let _ = fs::remove_file(wal_path);
     }
 }

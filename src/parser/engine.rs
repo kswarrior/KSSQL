@@ -213,12 +213,9 @@ impl Engine {
         if sql_upper == "COMMIT" {
             if let Some((_, tx)) = self.active_transactions.remove(&conn_id) {
                 for key in tx.updates.keys() {
-                    let data_opt = if let Some(v) = self.state.btree.memory_tier.get(key) {
-                        Some(v)
-                    } else {
-                        self.state.btree.get(key).await?
-                    };
-                    if let Some(data) = data_opt {
+                    let data_opt = self.state.btree.memory_tier.get(key);
+                    let data_res = if data_opt.is_some() { Ok(data_opt) } else { self.state.btree.get(key).await };
+                    if let Ok(Some(data)) = data_res {
                         let record: Record = bincode::deserialize(&data)?;
                         if record.version > tx.snapshot_version {
                             return Err(anyhow!("Transaction conflict detected (OCC)"));
@@ -446,13 +443,8 @@ impl Engine {
         }
 
         for key in keys_to_update {
-            let data = self
-                .state
-                .btree
-                .memory_tier
-                .get(&key)
-                .or(self.state.btree.get(&key).await?)
-                .ok_or_else(|| anyhow!("Record not found during update"))?;
+            let data_opt = self.state.btree.memory_tier.get(&key);
+            let data = if let Some(v) = data_opt { v } else { self.state.btree.get(&key).await?.ok_or_else(|| anyhow!("Record not found during update"))? };
             let mut record: Record = bincode::deserialize(&data)?;
             let mut row_data: HashMap<String, String> = bincode::deserialize(&record.value)?;
 
@@ -513,13 +505,8 @@ impl Engine {
         }
 
         for key in keys_to_delete {
-            let data = self
-                .state
-                .btree
-                .memory_tier
-                .get(&key)
-                .or(self.state.btree.get(&key).await?)
-                .ok_or_else(|| anyhow!("Record not found during delete"))?;
+            let data_opt = self.state.btree.memory_tier.get(&key);
+            let data = if let Some(v) = data_opt { v } else { self.state.btree.get(&key).await?.ok_or_else(|| anyhow!("Record not found during delete"))? };
             let mut record: Record = bincode::deserialize(&data)?;
             record.is_deleted = true;
             record.version = version + 1;
@@ -853,19 +840,21 @@ impl Engine {
 
                 if let (Some(col), Some(val)) = (get_id(left).or(get_id(right)), get_val(left).or(get_val(right))) {
                     let idx_key = format!("idx:{}:{}:{}", table_name, col, val);
-                    if let Some(target_key) = state.btree.memory_tier.get(idx_key.as_bytes()).or(state.btree.get(idx_key.as_bytes()).await?) {
+                    let target_key_opt = state.btree.memory_tier.get(idx_key.as_bytes()).or(state.btree.get(idx_key.as_bytes()).await?);
+                    if let Some(target_key) = target_key_opt {
                         let mut final_key = target_key.clone();
                         // Handle potential double serialization if key is stored as Vec<u8> in Record
                         if let Ok(Record { value, .. }) = bincode::deserialize::<Record>(&target_key) {
                              final_key = value;
                         }
 
-                        if let Some(record_data) = state.btree.memory_tier.get(&final_key).or(state.btree.get(&final_key).await?) {
+                        let record_data_res = if let Some(v) = state.btree.memory_tier.get(&final_key) { Ok(Some(v)) } else { state.btree.get(&final_key).await };
+                        if let Ok(Some(record_data)) = record_data_res {
                              let record: Record = bincode::deserialize(&record_data)?;
                              if record.version <= version && !record.is_deleted {
                                  let base_data: HashMap<String, String> = bincode::deserialize(&record.value)?;
                                  let mut row_data = HashMap::new();
-                                 row_data.insert("__key__".to_string(), String::from_utf8_lossy(&target_key).to_string());
+                                 row_data.insert("__key__".to_string(), String::from_utf8_lossy(&final_key).to_string());
                                  for (k, v) in base_data {
                                      row_data.insert(k.clone(), v.clone());
                                      row_data.insert(format!("{}.{}", table_name, k), v);
@@ -879,7 +868,7 @@ impl Engine {
         }
 
         // 1. Scan MemoryTier first for immediate consistency
-        for r in state.btree.memory_tier.cache.iter() {
+        for r in state.btree.memory_tier.turbo_cache.iter() {
             let key = r.key();
             let key_str = String::from_utf8_lossy(key);
             if key_str.starts_with(&prefix) {

@@ -1,4 +1,5 @@
 pub mod engine;
+pub mod scheduler;
 
 #[cfg(test)]
 mod tests {

@@ -3,10 +3,8 @@ use anyhow::Result;
 use crc32fast::Hasher;
 use std::sync::Arc;
 use tokio::sync::{oneshot, mpsc};
-use std::os::unix::fs::OpenOptionsExt;
 use std::alloc::{alloc, dealloc, Layout};
-use std::sync::atomic::{AtomicU64, Ordering};
-use tokio_uring::buf::{IoBuf, IoBufMut};
+use crate::storage::io::{AsyncIoBackend};
 
 pub const PAGE_SIZE: usize = 4096;
 
@@ -19,86 +17,68 @@ pub enum PagerRequest {
 
 pub struct Pager {
     tx: mpsc::Sender<PagerRequest>,
-    file_length: Arc<AtomicU64>,
+    backend: Arc<dyn AsyncIoBackend>,
 }
 
 impl Pager {
     pub async fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path_owned = path.as_ref().to_owned();
+
+        // Portability Abstract Layer (PAL): Select backend based on OS
+        #[cfg(target_os = "linux")]
+        let backend: Arc<dyn AsyncIoBackend> = Arc::new(crate::storage::io::IoUringBackend::open(&path_owned).await?);
+        #[cfg(not(target_os = "linux"))]
+        let backend: Arc<dyn AsyncIoBackend> = Arc::new(crate::storage::io::StdIoBackend::open(&path_owned)?);
+
         let (tx, mut rx) = mpsc::channel::<PagerRequest>(1024);
-        let file_length = Arc::new(AtomicU64::new(0));
-        let file_length_clone = Arc::clone(&file_length);
+        let backend_clone = Arc::clone(&backend);
 
-        std::thread::spawn(move || {
-            tokio_uring::start(async move {
-                let mut opts = std::fs::OpenOptions::new();
-                opts.read(true).write(true).create(true);
-                #[cfg(target_os = "linux")]
-                opts.custom_flags(libc::O_DIRECT);
-                
-                let std_file = opts.open(&path_owned).expect("Failed to open pager file (O_DIRECT)");
-                let metadata = std_file.metadata().expect("Failed to get metadata");
-                file_length_clone.store(metadata.len(), Ordering::SeqCst);
-                
-                let mut file = tokio_uring::fs::File::from_std(std_file);
-
-                while let Some(req) = rx.recv().await {
-                    match req {
-                        PagerRequest::Read { page_id, resp } => {
-                            let offset = page_id * PAGE_SIZE as u64;
-                            let buf = AlignedBuf::new(PAGE_SIZE);
-                            let (res, buf_ret) = file.read_at(buf, offset).await;
-                            
-                            if let Ok(n) = res {
-                                if n == PAGE_SIZE {
-                                    let mut page = [0u8; PAGE_SIZE];
-                                    page.copy_from_slice(buf_ret.as_slice());
-                                    let _ = resp.send(Ok(page));
-                                } else if n == 0 {
-                                    let _ = resp.send(Ok([0u8; PAGE_SIZE]));
-                                } else {
-                                    let _ = resp.send(Err(anyhow::anyhow!("Short read")));
-                                }
-                            } else {
-                                let _ = resp.send(Err(anyhow::anyhow!("Read failed: {:?}", res.err())));
+        tokio::spawn(async move {
+            let mut current_backend = backend_clone;
+            while let Some(req) = rx.recv().await {
+                match req {
+                    PagerRequest::Read { page_id, resp } => {
+                        let offset = page_id * PAGE_SIZE as u64;
+                        let res = current_backend.read_at(offset, PAGE_SIZE).await;
+                        match res {
+                            Ok(bytes) => {
+                                let mut page = [0u8; PAGE_SIZE];
+                                page.copy_from_slice(&bytes);
+                                let _ = resp.send(Ok(page));
                             }
-                        }
-                        PagerRequest::Write { page_id, data, resp } => {
-                            let offset = page_id * PAGE_SIZE as u64;
-                            let mut buf = AlignedBuf::new(PAGE_SIZE);
-                            buf.as_mut_slice().copy_from_slice(&data);
-                            let (res, _) = file.write_at(buf, offset).await;
-                            let _ = resp.send(res.map(|_| ()).map_err(Into::into));
-                        }
-                        PagerRequest::Sync { resp } => {
-                            let res = file.sync_all().await;
-                            let _ = resp.send(res.map_err(Into::into));
-                        }
-                        PagerRequest::Reload { path, resp } => {
-                            let mut opts = std::fs::OpenOptions::new();
-                            opts.read(true).write(true).create(true);
-                            #[cfg(target_os = "linux")]
-                            opts.custom_flags(libc::O_DIRECT);
-                            match opts.open(&path) {
-                                Ok(new_std_file) => {
-                                    let metadata = new_std_file.metadata().expect("Failed to get metadata");
-                                    file_length_clone.store(metadata.len(), Ordering::SeqCst);
-                                    file = tokio_uring::fs::File::from_std(new_std_file);
-                                    let _ = resp.send(Ok(()));
-                                }
-                                Err(e) => {
-                                    let _ = resp.send(Err(e.into()));
-                                }
+                            Err(e) => {
+                                let _ = resp.send(Err(e));
                             }
                         }
                     }
+                    PagerRequest::Write { page_id, data, resp } => {
+                        let offset = page_id * PAGE_SIZE as u64;
+                        let _ = resp.send(current_backend.write_at(offset, data.to_vec()).await);
+                    }
+                    PagerRequest::Sync { resp } => {
+                        let _ = resp.send(current_backend.sync_all().await);
+                    }
+                    PagerRequest::Reload { path, resp } => {
+                        #[cfg(target_os = "linux")]
+                        let new_backend_res = crate::storage::io::IoUringBackend::open(&path).await.map(|b| Arc::new(b) as Arc<dyn AsyncIoBackend>);
+                        #[cfg(not(target_os = "linux"))]
+                        let new_backend_res = crate::storage::io::StdIoBackend::open(&path).map(|b| Arc::new(b) as Arc<dyn AsyncIoBackend>);
+
+                        match new_backend_res {
+                            Ok(b) => {
+                                current_backend = b;
+                                let _ = resp.send(Ok(()));
+                            }
+                            Err(e) => { let _ = resp.send(Err(e)); }
+                        }
+                    }
                 }
-            });
+            }
         });
 
         Ok(Pager {
             tx,
-            file_length,
+            backend,
         })
     }
 
@@ -129,18 +109,11 @@ impl Pager {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(PagerRequest::Write { page_id, data: page, resp: tx }).await;
         rx.await??;
-
-        let offset = page_id * PAGE_SIZE as u64;
-        let current_len = self.file_length.load(Ordering::SeqCst);
-        if offset >= current_len {
-            self.file_length.store(offset + PAGE_SIZE as u64, Ordering::SeqCst);
-        }
-
         Ok(())
     }
 
     pub fn num_pages(&self) -> u64 {
-        let len = self.file_length.load(Ordering::SeqCst);
+        let len = self.backend.file_size();
         len / PAGE_SIZE as u64
     }
     
@@ -179,13 +152,13 @@ impl AlignedBuf {
     }
 }
 
-unsafe impl IoBuf for AlignedBuf {
+unsafe impl tokio_uring::buf::IoBuf for AlignedBuf {
     fn stable_ptr(&self) -> *const u8 { self.ptr }
     fn bytes_init(&self) -> usize { self.size }
     fn bytes_total(&self) -> usize { self.size }
 }
 
-unsafe impl IoBufMut for AlignedBuf {
+unsafe impl tokio_uring::buf::IoBufMut for AlignedBuf {
     fn stable_mut_ptr(&mut self) -> *mut u8 { self.ptr }
     unsafe fn set_init(&mut self, _pos: usize) { }
 }
