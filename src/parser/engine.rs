@@ -2,7 +2,7 @@ use crate::storage::btree::{BPlusTree, Node, NodeType, Record};
 use crate::storage::pager::{PAGE_SIZE};
 use crate::storage::wal::WalEntry;
 use crate::storage::{HardwareManager, HardwareSpecs};
-use crate::parser::scheduler::{DeterministicScheduler, TransactionRequest};
+use crate::parser::scheduler::{DeterministicScheduler};
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use dashmap::DashMap;
@@ -13,7 +13,6 @@ use sqlparser::parser::Parser;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use wasmi::*;
-use tokio::sync::oneshot;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TableSchema {
@@ -190,6 +189,12 @@ impl Engine {
 
     pub async fn execute(&self, sql: &str, conn_id: u32) -> Result<String> {
         let sql_upper = sql.trim().to_uppercase();
+
+        // --- 0. Virtualized System Catalog (pg_catalog) Interception ---
+        if sql_upper.contains("PG_CLASS") || sql_upper.contains("PG_NAMESPACE") {
+            return self.handle_catalog_query(sql).await;
+        }
+
         if sql_upper == "FLUSH" {
             self.state.btree.wal.flush_pipeline().await?;
             while self.state.btree.wal.pop_entry().is_some() {} // Wait for drain (simplified)
@@ -218,46 +223,29 @@ impl Engine {
         }
         if sql_upper == "COMMIT" {
             if let Some((_, tx)) = self.active_transactions.remove(&conn_id) {
-                // Use Deterministic Sequencer for high-contention commit
-                let (done_tx, done_rx) = oneshot::channel();
-                let write_set = tx.updates.keys().cloned().collect();
-                self.state.scheduler.schedule(TransactionRequest {
-                    tx_id: tx.id,
-                    read_set: tx.read_set.clone(),
-                    write_set,
-                    commit_tx: Some(done_tx),
-                }).await?;
+                // 1. Acquire Locks via Deterministic Sequencer
+                let write_set: HashSet<Vec<u8>> = tx.updates.keys().cloned().collect();
+                let lock_rx = self.state.scheduler.acquire(tx.id, tx.read_set.clone(), write_set.clone()).await?;
 
-                done_rx.await??;
+                // Wait for all prior conflicting transactions to release their locks
+                lock_rx.await??;
 
-                for key in tx.updates.keys() {
-                    let data_opt = self.state.btree.memory_tier.get(key);
-                    let data_res = if data_opt.is_some() { Ok(data_opt) } else { self.state.btree.get(key).await };
-                    if let Ok(Some(data)) = data_res {
-                        let record: Record = bincode::deserialize(&data)?;
-                        if record.version > tx.snapshot_version {
-                            return Err(anyhow!("Transaction conflict detected (OCC)"));
-                        }
-                    }
-                }
+                // 2. Perform OCC validation & Commit
+                let commit_res = self.perform_commit(tx, write_set.clone()).await;
 
-                let version = self.state.current_version.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-                for (k, v) in tx.updates {
-                    let mut record: Record = bincode::deserialize(&v)?;
-                    record.version = version;
-                    let v_new = bincode::serialize(&record)?;
-                    self.state.btree.memory_tier.insert_kv(k.clone(), v_new.clone());
-                    self.state.btree.wal.enqueue(WalEntry::RecordUpdate { key: k, data: v_new })?;
-                }
+                // 3. Explicitly Release Locks
+                let _ = self.state.scheduler.release(conn_id as u64, write_set).await;
 
-                self.state.btree.wal.flush_pipeline().await?;
-                return Ok("Transaction committed".to_string());
+                return commit_res;
             }
             return Err(anyhow!("No active transaction"));
         }
 
         if sql_upper == "ROLLBACK" {
-            self.active_transactions.remove(&conn_id);
+            if let Some((_, tx)) = self.active_transactions.remove(&conn_id) {
+                 let write_set = tx.updates.keys().cloned().collect();
+                 let _ = self.state.scheduler.release(tx.id, write_set).await;
+            }
             return Ok("Transaction rolled back".to_string());
         }
 
@@ -281,6 +269,40 @@ impl Engine {
             }
         }
         Ok(results.join("\n"))
+    }
+
+    async fn perform_commit(&self, tx: Transaction, write_set: HashSet<Vec<u8>>) -> Result<String> {
+        for key in &write_set {
+            let data_opt = self.state.btree.memory_tier.get(key);
+            let data_res = if data_opt.is_some() { Ok(data_opt) } else { self.state.btree.get(key).await };
+            if let Ok(Some(data)) = data_res {
+                let record: Record = bincode::deserialize(&data)?;
+                if record.version > tx.snapshot_version {
+                    return Err(anyhow!("Transaction conflict detected (OCC)"));
+                }
+            }
+        }
+
+        let version = self.state.current_version.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        for (k, v) in tx.updates {
+            let mut record: Record = bincode::deserialize(&v)?;
+            record.version = version;
+            let v_new = bincode::serialize(&record)?;
+            self.state.btree.memory_tier.insert_kv(k.clone(), v_new.clone());
+            self.state.btree.wal.enqueue(WalEntry::RecordUpdate { key: k, data: v_new })?;
+        }
+
+        self.state.btree.wal.flush_pipeline().await?;
+        Ok("Transaction committed".to_string())
+    }
+
+    async fn handle_catalog_query(&self, _sql: &str) -> Result<String> {
+        let mut output = "relname | relkind | relnamespace\n".to_string();
+        output += "---------------------------------\n";
+        for r in self.state.schemas.iter() {
+            output += &format!("{} | r | 11\n", r.key());
+        }
+        Ok(output)
     }
 
     async fn execute_statement(&self, stmt: Statement, conn_id: u32) -> Result<String> {

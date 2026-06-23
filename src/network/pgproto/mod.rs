@@ -64,6 +64,43 @@ impl PgProtocolHandler {
         }
     }
 
+    pub fn encode_row_description(columns: &[String]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.push(b'T');
+        let mut msg = Vec::new();
+        msg.extend_from_slice(&(columns.len() as u16).to_be_bytes());
+        for col in columns {
+            msg.extend_from_slice(col.as_bytes());
+            msg.push(0);
+            msg.extend_from_slice(&0u32.to_be_bytes()); // table oid
+            msg.extend_from_slice(&0u16.to_be_bytes()); // col attr
+            msg.extend_from_slice(&25u32.to_be_bytes()); // type oid (TEXT)
+            msg.extend_from_slice(&(-1i16).to_be_bytes()); // type size
+            msg.extend_from_slice(&0u32.to_be_bytes()); // type mod
+            msg.extend_from_slice(&0u16.to_be_bytes()); // format (text)
+        }
+        let total_len = (msg.len() + 4) as i32;
+        buf.extend_from_slice(&total_len.to_be_bytes());
+        buf.extend_from_slice(&msg);
+        buf
+    }
+
+    pub fn encode_data_row(values: &[String]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.push(b'D');
+        let mut msg = Vec::new();
+        msg.extend_from_slice(&(values.len() as u16).to_be_bytes());
+        for val in values {
+            let bytes = val.as_bytes();
+            msg.extend_from_slice(&(bytes.len() as i32).to_be_bytes());
+            msg.extend_from_slice(bytes);
+        }
+        let total_len = (msg.len() + 4) as i32;
+        buf.extend_from_slice(&total_len.to_be_bytes());
+        buf.extend_from_slice(&msg);
+        buf
+    }
+
     fn read_string(buffer: &[u8], cursor: &mut usize) -> Result<String> {
         let start = *cursor;
         while *cursor < buffer.len() && buffer[*cursor] != 0 {
