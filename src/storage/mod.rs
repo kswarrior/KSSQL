@@ -2,6 +2,7 @@ pub mod pager;
 pub mod wal;
 pub mod btree;
 pub mod io;
+pub mod columnar;
 
 use sysinfo::System;
 use dashmap::DashMap;
@@ -50,10 +51,11 @@ impl MemTable {
     }
 }
 
-/// A tiered memory management system for ultra-scale workloads
+/// A tiered memory management system for ultra-scale HTAP workloads
 pub struct TieredMemory {
-    pub turbo_cache: DashMap<Vec<u8>, Vec<u8>>, // KV records
-    pub index_cache: DashMap<Vec<u8>, Vec<u8>>, // SSTable / Index metadata
+    pub turbo_cache: DashMap<Vec<u8>, Vec<u8>>,      // KV records (40%)
+    pub index_cache: DashMap<Vec<u8>, Vec<u8>>,      // SSTable / Index metadata (20%)
+    pub columnar_cache: DashMap<Vec<u8>, Vec<u8>>,   // HTAP Vectorized Chunks (30%)
     pub lru: DashMap<Vec<u8>, LruEntry>,
     pub metrics: MemoryMetrics,
     pub turbo_mode: Arc<AtomicU64>,
@@ -66,6 +68,7 @@ impl TieredMemory {
         Self {
             turbo_cache: DashMap::new(),
             index_cache: DashMap::new(),
+            columnar_cache: DashMap::new(),
             lru: DashMap::new(),
             metrics: MemoryMetrics {
                 hits: Arc::new(AtomicU64::new(0)),
@@ -83,6 +86,10 @@ impl TieredMemory {
              return Some(val.clone());
         }
         if let Some(val) = self.index_cache.get(key) {
+             self.hit(key);
+             return Some(val.clone());
+        }
+        if let Some(val) = self.columnar_cache.get(key) {
              self.hit(key);
              return Some(val.clone());
         }
@@ -110,10 +117,20 @@ impl TieredMemory {
     }
 
     pub fn insert_with_priority(&self, key: Vec<u8>, value: Vec<u8>, priority: u32) {
-        let pool = if key.starts_with(&[0xFF]) { &self.index_cache } else { &self.turbo_cache };
+        // Namespace mapping:
+        // 0xFF: Index Cache
+        // 0xFE: Columnar Chunk Cache
+        // others: Turbo Cache (KV)
+        let pool = if key.starts_with(&[0xFF]) {
+            &self.index_cache
+        } else if key.starts_with(&[0xFE]) {
+            &self.columnar_cache
+        } else {
+            &self.turbo_cache
+        };
         
         let max_bytes = self.max_ram_mb.load(Ordering::Relaxed) * 1024 * 1024;
-        let current_entries = self.turbo_cache.len() + self.index_cache.len();
+        let current_entries = self.turbo_cache.len() + self.index_cache.len() + self.columnar_cache.len();
         if current_entries as u64 * 256 > max_bytes {
             self.evict_lru(current_entries / 10);
         }
@@ -146,6 +163,7 @@ impl TieredMemory {
             let key = &items[i].0;
             self.turbo_cache.remove(key);
             self.index_cache.remove(key);
+            self.columnar_cache.remove(key);
             self.lru.remove(key);
         }
     }
@@ -153,12 +171,14 @@ impl TieredMemory {
     pub fn remove(&self, key: &[u8]) {
         self.turbo_cache.remove(key);
         self.index_cache.remove(key);
+        self.columnar_cache.remove(key);
         self.lru.remove(key);
     }
 
     pub fn clear(&self) {
         self.turbo_cache.clear();
         self.index_cache.clear();
+        self.columnar_cache.clear();
         self.lru.clear();
     }
 

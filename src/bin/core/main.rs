@@ -41,8 +41,12 @@ async fn main() -> anyhow::Result<()> {
 
     println!("\x1b[38;5;45mInitializing Titan-Prime Evolution Core...\x1b[0m");
 
-    // Spawn Worker Process
-    let mut _worker = Command::new("./target/debug/ks-worker")
+    // Spawn Worker Process using current executable path logic
+    let exe_path = std::env::current_exe()?;
+    let bin_dir = exe_path.parent().unwrap();
+    let worker_bin = bin_dir.join("ks-worker");
+
+    let mut _worker = Command::new(worker_bin)
         .spawn()
         .expect("Failed to start ks-worker process");
 
