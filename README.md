@@ -47,7 +47,31 @@ Binaries will be available at:
 
 ## 🖥️ Usage
 
-Start the core engine (which automatically spawns workers):
+### From Release Package (Linux x64)
+
+1. Extract the release binaries:
+```bash
+mkdir ks-sql-release && tar -xzf ks-sql-linux-x64.tar.gz -C ks-sql-release
+cd ks-sql-release
+```
+
+2. Start the core engine (which automatically spawns the analytical worker):
+```bash
+./ks-core --port w:8080 m:5432 --db ./data.ksql
+```
+
+### From Release Package (Windows x64)
+
+1. Extract `ks-sql-windows-x64.zip` using your preferred tool.
+2. Open PowerShell or Command Prompt in the extracted folder.
+3. Run the core engine:
+```powershell
+.\ks-core.exe --port w:8080 m:5432 --db .\data.ksql
+```
+
+### Running from Source
+
+Start the core engine after building:
 
 ```bash
 ./target/release/ks-core --port w:8080 m:5432 --db ks_database.ksql
