@@ -64,7 +64,7 @@ pub struct Engine {
 impl Engine {
     pub async fn new(db_path: &str, wal_path: &str) -> Result<Self> {
         let hardware_specs = HardwareManager::scan();
-        let memory_tier = Arc::new(crate::storage::MemoryTier::new(1024));
+        let memory_tier = Arc::new(crate::storage::TieredMemory::new(1024));
         let btree = BPlusTree::open(db_path, wal_path, memory_tier).await?;
 
         let schemas = DashMap::new();
@@ -97,42 +97,38 @@ impl Engine {
         });
 
         let state_for_drain = Arc::clone(&engine_state);
-        std::thread::spawn(move || {
-            tokio_uring::start(async move {
-                loop {
-                    let mut entries = Vec::new();
-                    // Increased batch size for high-throughput drain
-                    for _ in 0..5000 {
-                        if let Some(entry) = state_for_drain.btree.wal.pop_entry() {
-                            entries.push(entry);
-                        } else {
-                            break;
-                        }
+        tokio::spawn(async move {
+            loop {
+                let mut entries = Vec::new();
+                for _ in 0..5000 {
+                    if let Some(entry) = state_for_drain.btree.wal.pop_entry() {
+                        entries.push(entry);
+                    } else {
+                        break;
                     }
-
-                    if entries.is_empty() {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
-                        continue;
-                    }
-
-                    for entry in entries {
-                        match entry {
-                            WalEntry::RecordUpdate { key, data } => {
-                                let _ = state_for_drain.btree.insert(key, data).await;
-                            }
-                            WalEntry::PageUpdate { page_id, data } => {
-                                let mut page = [0u8; PAGE_SIZE];
-                                let len = data.len().min(PAGE_SIZE);
-                                page[..len].copy_from_slice(&data[..len]);
-                                let _ = state_for_drain.btree.pager.write_page(page_id, &page).await;
-                            }
-                            _ => {}
-                        }
-                    }
-                    // Batch sync after draining a set of entries
-                    let _ = state_for_drain.btree.pager.sync().await;
                 }
-            });
+
+                if entries.is_empty() {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+                    continue;
+                }
+
+                for entry in entries {
+                    match entry {
+                        WalEntry::RecordUpdate { key, data } => {
+                            let _ = state_for_drain.btree.insert(key, data).await;
+                        }
+                        WalEntry::PageUpdate { page_id, data } => {
+                            let mut page = [0u8; PAGE_SIZE];
+                            let len = data.len().min(PAGE_SIZE);
+                            page[..len].copy_from_slice(&data[..len]);
+                            let _ = state_for_drain.btree.pager.write_page(page_id, &page).await;
+                        }
+                        _ => {}
+                    }
+                }
+                let _ = state_for_drain.btree.pager.sync().await;
+            }
         });
 
         Ok(Engine {

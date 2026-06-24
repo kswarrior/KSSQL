@@ -25,10 +25,16 @@ impl Pager {
         let path_owned = path.as_ref().to_owned();
 
         // Portability Abstract Layer (PAL): Select backend based on OS
-        #[cfg(target_os = "linux")]
-        let backend: Arc<dyn AsyncIoBackend> = Arc::new(crate::storage::io::IoUringBackend::open(&path_owned).await?);
-        #[cfg(not(target_os = "linux"))]
-        let backend: Arc<dyn AsyncIoBackend> = Arc::new(crate::storage::io::StdIoBackend::open(&path_owned)?);
+        let backend: Arc<dyn AsyncIoBackend> = {
+            #[cfg(target_os = "linux")]
+            {
+                Arc::new(crate::storage::io::IoUringBackend::open(&path_owned).await?)
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Arc::new(crate::storage::io::StdIoBackend::open(&path_owned)?)
+            }
+        };
 
         let (tx, mut rx) = mpsc::channel::<PagerRequest>(1024);
         let backend_clone = Arc::clone(&backend);
@@ -59,11 +65,12 @@ impl Pager {
                         let _ = resp.send(current_backend.sync_all().await);
                     }
                     PagerRequest::Reload { path, resp } => {
-                        #[cfg(target_os = "linux")]
-                        let new_backend_res = crate::storage::io::IoUringBackend::open(&path).await.map(|b| Arc::new(b) as Arc<dyn AsyncIoBackend>);
-                        #[cfg(not(target_os = "linux"))]
-                        let new_backend_res = crate::storage::io::StdIoBackend::open(&path).map(|b| Arc::new(b) as Arc<dyn AsyncIoBackend>);
-
+                        let new_backend_res: Result<Arc<dyn AsyncIoBackend>> = {
+                            #[cfg(target_os = "linux")]
+                            { crate::storage::io::IoUringBackend::open(&path).await.map(|b| Arc::new(b) as Arc<dyn AsyncIoBackend>) }
+                            #[cfg(not(target_os = "linux"))]
+                            { crate::storage::io::StdIoBackend::open(&path).map(|b| Arc::new(b) as Arc<dyn AsyncIoBackend>) }
+                        };
                         match new_backend_res {
                             Ok(b) => {
                                 current_backend = b;
@@ -152,12 +159,14 @@ impl AlignedBuf {
     }
 }
 
+#[cfg(target_os = "linux")]
 unsafe impl tokio_uring::buf::IoBuf for AlignedBuf {
     fn stable_ptr(&self) -> *const u8 { self.ptr }
     fn bytes_init(&self) -> usize { self.size }
     fn bytes_total(&self) -> usize { self.size }
 }
 
+#[cfg(target_os = "linux")]
 unsafe impl tokio_uring::buf::IoBufMut for AlignedBuf {
     fn stable_mut_ptr(&mut self) -> *mut u8 { self.ptr }
     unsafe fn set_init(&mut self, _pos: usize) { }

@@ -1,8 +1,7 @@
-use anyhow::Result;
 use std::path::{Path, PathBuf};
+use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
-use crate::storage::pager::AlignedBuf;
 
 #[async_trait]
 pub trait AsyncIoBackend: Send + Sync {
@@ -33,40 +32,52 @@ impl IoUringBackend {
             size.store(std::fs::metadata(&path_owned)?.len(), std::sync::atomic::Ordering::SeqCst);
         }
 
-        std::thread::spawn(move || {
-            tokio_uring::start(async move {
-                let mut opts = std::fs::OpenOptions::new();
-                opts.read(true).write(true).create(true);
-                #[cfg(target_os = "linux")]
-                {
-                    use std::os::unix::fs::OpenOptionsExt;
-                    opts.custom_flags(libc::O_DIRECT);
-                }
+        #[cfg(target_os = "linux")]
+        {
+            std::thread::spawn(move || {
+                tokio_uring::start(async move {
+                    let mut opts = std::fs::OpenOptions::new();
+                    opts.read(true).write(true).create(true);
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        opts.custom_flags(libc::O_DIRECT);
+                    }
 
-                let std_file = opts.open(&path_owned).expect("Failed to open file in io_uring thread");
-                let file = tokio_uring::fs::File::from_std(std_file);
+                    let std_file = opts.open(&path_owned).expect("Failed to open file in io_uring thread");
+                    let file = tokio_uring::fs::File::from_std(std_file);
 
-                while let Some(req) = rx.recv().await {
-                    match req {
-                        IoRequest::Read { offset, size, resp } => {
-                            let buf = AlignedBuf::new(size);
-                            let (res, buf_ret) = file.read_at(buf, offset).await;
-                            let _ = resp.send(res.map(|_| buf_ret.as_slice().to_vec()).map_err(Into::into));
-                        }
-                        IoRequest::Write { offset, data, resp } => {
-                            let mut buf = AlignedBuf::new(data.len());
-                            buf.as_mut_slice().copy_from_slice(&data);
-                            let (res, _) = file.write_at(buf, offset).await;
-                            let _ = resp.send(res.map(|_| ()).map_err(Into::into));
-                        }
-                        IoRequest::Sync { resp } => {
-                            let _ = resp.send(file.sync_all().await.map_err(Into::into));
+                    while let Some(req) = rx.recv().await {
+                        match req {
+                            IoRequest::Read { offset, size, resp } => {
+                                use crate::storage::pager::AlignedBuf;
+                                let buf = AlignedBuf::new(size);
+                                let (res, buf_ret) = file.read_at(buf, offset).await;
+                                let _ = resp.send(res.map(|_| buf_ret.as_slice().to_vec()).map_err(Into::into));
+                            }
+                            IoRequest::Write { offset, data, resp } => {
+                                use crate::storage::pager::AlignedBuf;
+                                let mut buf = AlignedBuf::new(data.len());
+                                buf.as_mut_slice().copy_from_slice(&data);
+                                let (res, _) = file.write_at(buf, offset).await;
+                                let _ = resp.send(res.map(|_| ()).map_err(Into::into));
+                            }
+                            IoRequest::Sync { resp } => {
+                                let _ = resp.send(file.sync_all().await.map_err(Into::into));
+                            }
                         }
                     }
-                }
+                });
             });
-        });
+        }
 
+        #[cfg(not(target_os = "linux"))]
+        {
+             let _ = tx;
+             let _ = rx;
+             return Err(anyhow::anyhow!("io_uring is only available on Linux"));
+        }
+
+        #[cfg(target_os = "linux")]
         Ok(Self { tx, size })
     }
 }

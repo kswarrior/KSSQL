@@ -15,13 +15,6 @@ pub enum SchedulerRequest {
     },
 }
 
-pub struct TransactionRequest {
-    pub tx_id: u64,
-    pub read_set: HashSet<Vec<u8>>,
-    pub write_set: HashSet<Vec<u8>>,
-    pub commit_tx: Option<oneshot::Sender<Result<()>>>,
-}
-
 pub struct DeterministicScheduler {
     tx: mpsc::Sender<SchedulerRequest>,
 }
@@ -61,10 +54,9 @@ impl DeterministicScheduler {
                             }
                         }
 
-                        // After release, try to drain pending queue
                         let mut i = 0;
                         while i < pending_queue.len() {
-                            let (p_tx_id, p_read, p_write, _) = &pending_queue[i];
+                            let (_p_tx_id, p_read, p_write, _) = &pending_queue[i];
                             let mut p_conflict = false;
                             for k in p_read { if active_writes.contains_key(k) { p_conflict = true; break; } }
                             if !p_conflict {
@@ -75,7 +67,6 @@ impl DeterministicScheduler {
                                 let (tx_id, _, write_set, resp) = pending_queue.remove(i);
                                 for k in &write_set { active_writes.insert(k.clone(), tx_id); }
                                 let _ = resp.send(Ok(()));
-                                // Reset drain loop to check all after new locks
                                 i = 0;
                             } else {
                                 i += 1;
