@@ -10,6 +10,8 @@ jobs:
   build-and-release:
     name: Build for ${{ matrix.platform.os }}
     runs-on: ${{ matrix.platform.os }}
+    permissions:
+      contents: write
     strategy:
       matrix:
         platform:
@@ -65,7 +67,6 @@ jobs:
           tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v1.1.0-rev-{0}', github.run_id) }}
           name: ${{ github.ref_type == 'tag' && format('Titan-Prime Release {0}', github.ref_name) || format('Titan-Prime Manual Build {0}', github.run_id) }}
           files: |
-            ks-sql-${{ matrix.platform.name }}.tar.gz
-            ks-sql-${{ matrix.platform.name }}.zip
+            ks-sql-${{ matrix.platform.name }}.*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
