@@ -1,6 +1,9 @@
 pub mod executor;
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum DataType {
     Int64,

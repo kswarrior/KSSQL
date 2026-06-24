@@ -314,6 +314,10 @@ impl Engine {
             }
         }
         match stmt {
+            Statement::Insert { table_name, source, columns, .. } => {
+                let source = source.ok_or_else(|| anyhow!("Source missing"))?;
+                self.handle_insert(table_name.to_string(), source, columns, conn_id).await
+            }
             Statement::CreateIndex { name, table_name, columns, .. } => {
                 let index_name = name.as_ref().map(|n| n.to_string()).unwrap_or_else(|| "unnamed_idx".to_string());
                 let schema = IndexSchema {
@@ -341,6 +345,8 @@ impl Engine {
             }
             Statement::CreateTable { name, columns, .. } => {
                 let auto_increment_col = columns.iter().find(|c| {
+                    let type_str = c.data_type.to_string().to_uppercase();
+                    if type_str.contains("SERIAL") { return true; }
                     c.options.iter().any(|o| {
                         let opt_str = o.to_string().to_uppercase();
                         opt_str.contains("AUTO_INCREMENT") || opt_str.contains("SERIAL")
@@ -373,10 +379,6 @@ impl Engine {
             }
             Statement::Explain { statement, .. } => {
                 Ok(format!("Execution Plan (Titan-Prime):\n- io_uring I/O\n- O_DIRECT DMA\n- Lock-Free ArrayQueue\n- Ping-Pong Double Buffering\n- Statement: {:?}", statement))
-            }
-            Statement::Insert { table_name, source, .. } => {
-                let source = source.ok_or_else(|| anyhow!("Source missing"))?;
-                self.handle_insert(table_name.to_string(), source, conn_id).await
             }
             Statement::Query(query) => self.handle_query(*query, conn_id).await,
             Statement::Update { table, assignments, selection, .. } => {
@@ -579,6 +581,7 @@ impl Engine {
         &self,
         table_name: String,
         source: Box<Query>,
+        provided_cols: Vec<sqlparser::ast::Ident>,
         conn_id: u32,
     ) -> Result<String> {
         let schema = self
@@ -596,20 +599,51 @@ impl Engine {
             for row in &values.rows {
                 let mut row_data = HashMap::new();
                 
-                if let Some(ref ai_col) = schema.auto_increment_col {
-                    row_data.insert(ai_col.clone(), next_id.to_string());
-                    next_id += 1;
+                // Initialize all columns with NULL
+                for col in &schema.columns {
+                    row_data.insert(col.clone(), "NULL".to_string());
                 }
 
-                for (i, expr) in row.iter().enumerate() {
-                    let col_idx = if schema.auto_increment_col.is_some() { i + 1 } else { i };
-                    if col_idx < schema.columns.len() {
-                        let val = match expr {
-                            Expr::Value(Value::Number(n, _)) => n.clone(),
-                            Expr::Value(Value::SingleQuotedString(s)) => s.clone(),
-                            _ => "NULL".to_string(),
-                        };
-                        row_data.insert(schema.columns[col_idx].clone(), val);
+                if provided_cols.is_empty() {
+                    let mut expr_idx = 0;
+                    for col_name in &schema.columns {
+                        if let Some(ref ai_col) = schema.auto_increment_col {
+                            if ai_col == col_name {
+                                row_data.insert(col_name.clone(), next_id.to_string());
+                                next_id += 1;
+                                continue;
+                            }
+                        }
+
+                        if expr_idx < row.len() {
+                            let expr = &row[expr_idx];
+                            let val = match expr {
+                                Expr::Value(Value::Number(n, _)) => n.clone(),
+                                Expr::Value(Value::SingleQuotedString(s)) => s.clone(),
+                                _ => "NULL".to_string(),
+                            };
+                            row_data.insert(col_name.clone(), val);
+                            expr_idx += 1;
+                        }
+                    }
+                } else {
+                    // Map provided columns to values
+                    for (i, col_ident) in provided_cols.iter().enumerate() {
+                        if i < row.len() {
+                            let val = match &row[i] {
+                                Expr::Value(Value::Number(n, _)) => n.clone(),
+                                Expr::Value(Value::SingleQuotedString(s)) => s.clone(),
+                                _ => "NULL".to_string(),
+                            };
+                            row_data.insert(col_ident.to_string(), val);
+                        }
+                    }
+                    // Handle auto-increment if not provided
+                    if let Some(ref ai_col) = schema.auto_increment_col {
+                        if row_data.get(ai_col).map(|v| v == "NULL").unwrap_or(true) {
+                            row_data.insert(ai_col.clone(), next_id.to_string());
+                            next_id += 1;
+                        }
                     }
                 }
                 let id = rand::random::<u64>();

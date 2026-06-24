@@ -111,3 +111,6 @@ impl PgProtocolHandler {
         Ok(s)
     }
 }
+
+#[cfg(test)]
+mod tests;

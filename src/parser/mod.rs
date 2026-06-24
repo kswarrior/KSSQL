@@ -2,9 +2,28 @@ pub mod engine;
 pub mod scheduler;
 
 #[cfg(test)]
+mod scheduler_tests;
+#[cfg(test)]
+mod extended_tests;
+
+#[cfg(test)]
 mod tests {
     use super::engine::Engine;
     use std::fs;
+
+    fn run_test<F>(f: F)
+    where F: std::future::Future<Output = ()> + Send + 'static
+    {
+        #[cfg(target_os = "linux")]
+        {
+            tokio_uring::start(f);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(f);
+        }
+    }
 
     #[test]
     fn test_engine_sql() {
@@ -13,7 +32,7 @@ mod tests {
         let _ = fs::remove_file(db_path);
         let _ = fs::remove_file(wal_path);
         
-        tokio_uring::start(async move {
+        run_test(async move {
             let engine = Engine::new(db_path, wal_path).await.unwrap();
             engine.execute("CREATE TABLE users (id INT, name TEXT)", 0).await.unwrap();
             engine.execute("INSERT INTO users VALUES (1, 'Alice')", 0).await.unwrap();
@@ -31,7 +50,7 @@ mod tests {
         let _ = fs::remove_file(db_path);
         let _ = fs::remove_file(wal_path);
 
-        tokio_uring::start(async move {
+        run_test(async move {
             let engine = Engine::new(db_path, wal_path).await.unwrap();
             engine.execute("CREATE TABLE accounts (id INT, balance TEXT)", 0).await.unwrap();
             engine.execute("INSERT INTO accounts VALUES (1, '100')", 0).await.unwrap();
@@ -58,6 +77,20 @@ mod tests_extended {
     use super::engine::Engine;
     use std::fs;
 
+    fn run_test<F>(f: F)
+    where F: std::future::Future<Output = ()> + Send + 'static
+    {
+        #[cfg(target_os = "linux")]
+        {
+            tokio_uring::start(f);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            rt.block_on(f);
+        }
+    }
+
     #[test]
     fn test_where_clause_dml() {
         let db_path = "test_dml_ext.ksql";
@@ -65,7 +98,7 @@ mod tests_extended {
         let _ = fs::remove_file(db_path);
         let _ = fs::remove_file(wal_path);
 
-        tokio_uring::start(async move {
+        run_test(async move {
             let engine = Engine::new(db_path, wal_path).await.unwrap();
             
             engine.execute("CREATE TABLE users (id TEXT, name TEXT)", 1).await.unwrap();
@@ -98,7 +131,7 @@ mod tests_extended {
         let _ = fs::remove_file(db_path);
         let _ = fs::remove_file(wal_path);
 
-        tokio_uring::start(async move {
+        run_test(async move {
             let engine = Engine::new(db_path, wal_path).await.unwrap();
             
             engine.execute("CREATE TABLE a (id TEXT, val TEXT)", 1).await.unwrap();

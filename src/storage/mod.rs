@@ -215,6 +215,9 @@ pub struct HardwareSpecs {
 
 pub struct HardwareManager;
 
+#[cfg(test)]
+mod tiered_tests;
+
 impl HardwareManager {
     pub fn scan() -> HardwareSpecs {
         let mut sys = System::new_all();
