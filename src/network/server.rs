@@ -116,7 +116,7 @@ impl Server {
 }
 
 async fn handle_tcp_connection(
-    mut socket: TcpStream,
+    socket: TcpStream,
     engine: Arc<Engine>,
     tx: broadcast::Sender<String>,
     conn_id: u32,
@@ -142,8 +142,27 @@ async fn handle_tcp_connection(
 
 async fn handle_pg_wire(mut socket: TcpStream, engine: Arc<Engine>, tx: broadcast::Sender<String>, conn_id: u32) -> Result<()> {
     let mut buffer = [0u8; 8192];
-    let _ = socket.read(&mut buffer).await?;
 
+    // 1. Initial Handshake
+    let n = socket.read(&mut buffer).await?;
+    if n == 0 { return Ok(()); }
+
+    if let Ok((msg, _)) = PgProtocolHandler::decode(&buffer[..n]) {
+        match msg {
+            PgMessage::SSLRequest => {
+                socket.write_all(b"N").await?; // No SSL
+                let n2 = socket.read(&mut buffer).await?;
+                if n2 == 0 { return Ok(()); }
+                // Expect Startup after SSL response
+            }
+            PgMessage::Startup { .. } => {
+                // Handled below
+            }
+            _ => return Err(anyhow::anyhow!("Expected Startup Message")),
+        }
+    }
+
+    // Authentication OK + ReadyForQuery
     socket.write_all(&[b'R', 0, 0, 0, 8, 0, 0, 0, 0]).await?;
     socket.write_all(&[b'Z', 0, 0, 0, 5, b'I']).await?;
 
@@ -155,13 +174,27 @@ async fn handle_pg_wire(mut socket: TcpStream, engine: Arc<Engine>, tx: broadcas
             match msg {
                 PgMessage::Query(q) => {
                     let _ = tx.send(q.clone());
-                    let result = match engine.execute(&q, conn_id).await {
-                        Ok(res) => res,
-                        Err(e) => format!("Error: {}", e),
+                    match engine.execute(&q, conn_id).await {
+                        Ok(res) => {
+                            let lines: Vec<&str> = res.split('\n').collect();
+                            if lines.len() > 1 && lines[0].contains('|') {
+                                // Result set (Table)
+                                let cols: Vec<String> = lines[0].split('|').map(|s| s.trim().to_string()).collect();
+                                socket.write_all(&PgProtocolHandler::encode_row_description(&cols)).await?;
+                                for line in &lines[2..] {
+                                    if line.trim().is_empty() { continue; }
+                                    let vals: Vec<String> = line.split('|').map(|s| s.trim().to_string()).collect();
+                                    socket.write_all(&PgProtocolHandler::encode_data_row(&vals)).await?;
+                                }
+                            } else {
+                                // Command response (e.g. "Inserted 1 rows")
+                            }
+                        }
+                        Err(e) => {
+                            let err_msg = format!("Error: {}", e);
+                            socket.write_all(&PgProtocolHandler::encode_data_row(&[err_msg])).await?;
+                        }
                     };
-                    socket.write_all(b"T").await?;
-                    socket.write_all(&result.as_bytes()).await?;
-                    socket.write_all(b"\n").await?;
                     socket.write_all(&[b'C', 0, 0, 0, 9, b'S', b'E', b'L', b'E', b'C', b'T', 0]).await?;
                     socket.write_all(&[b'Z', 0, 0, 0, 5, b'I']).await?;
                 }

@@ -1,3 +1,4 @@
+#[cfg(target_os = "linux")]
 use crate::storage::pager::AlignedBuf;
 use anyhow::Result;
 use crossbeam::queue::ArrayQueue;
@@ -123,7 +124,7 @@ impl Wal {
             {
                 let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
                 rt.block_on(async move {
-                    use std::io::{Write, Seek, SeekFrom};
+                    use std::io::Write;
                     let mut file = std::fs::OpenOptions::new().write(true).create(true).append(true).open(&path_for_thread).expect("Failed to open WAL");
 
                     while let Some(req) = rx.recv().await {

@@ -25,7 +25,10 @@ pub struct IoUringBackend {
 impl IoUringBackend {
     pub async fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path_owned = path.as_ref().to_owned();
+        #[cfg(target_os = "linux")]
         let (tx, mut rx) = mpsc::channel::<IoRequest>(1024);
+        #[cfg(not(target_os = "linux"))]
+        let (tx, rx) = mpsc::channel::<IoRequest>(1024);
         let size = std::sync::atomic::AtomicU64::new(0);
 
         if path_owned.exists() {

@@ -219,9 +219,10 @@ impl Engine {
         }
         if sql_upper == "COMMIT" {
             if let Some((_, tx)) = self.active_transactions.remove(&conn_id) {
+                let tx_id = tx.id;
                 // 1. Acquire Locks via Deterministic Sequencer
                 let write_set: HashSet<Vec<u8>> = tx.updates.keys().cloned().collect();
-                let lock_rx = self.state.scheduler.acquire(tx.id, tx.read_set.clone(), write_set.clone()).await?;
+                let lock_rx = self.state.scheduler.acquire(tx_id, tx.read_set.clone(), write_set.clone()).await?;
 
                 // Wait for all prior conflicting transactions to release their locks
                 lock_rx.await??;
@@ -230,7 +231,7 @@ impl Engine {
                 let commit_res = self.perform_commit(tx, write_set.clone()).await;
 
                 // 3. Explicitly Release Locks
-                let _ = self.state.scheduler.release(conn_id as u64, write_set).await;
+                let _ = self.state.scheduler.release(tx_id, write_set).await;
 
                 return commit_res;
             }
