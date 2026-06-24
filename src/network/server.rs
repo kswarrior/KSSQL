@@ -1,4 +1,5 @@
 use crate::parser::engine::Engine;
+use crate::network::pgproto::{PgProtocolHandler, PgMessage};
 use anyhow::Result;
 use axum::{
     extract::{ws::WebSocket, State, WebSocketUpgrade},
@@ -11,7 +12,7 @@ use axum_server::tls_rustls::RustlsConfig;
 use serde_json::json;
 use std::fs;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, AsyncReadExt};
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
 use tokio::sync::broadcast;
 
@@ -48,7 +49,7 @@ impl Server {
                     return;
                 }
             };
-            println!("\x1b[38;5;82m[LIVE]\x1b[0m SQL Engine Protocol: \x1b[1mksql://{}:{}@{}\x1b[0m", admin_user, admin_pass, tcp_addr);
+            println!("\x1b[38;5;82m[LIVE]\x1b[0m SQL Engine Protocol (KS-SQL + PG-Wire): \x1b[1mport {}\x1b[0m", main_port);
             let mut next_conn_id = 1000;
             loop {
                 let (socket, _) = match listener.accept().await {
@@ -101,15 +102,11 @@ impl Server {
             .await?;
 
             println!("\x1b[38;5;82m[LIVE]\x1b[0m Command Center: \x1b[1;38;5;45mhttps://localhost:{}/\x1b[0m", web_port);
-            println!("\x1b[38;5;45m[INFO]\x1b[0m SSL/TLS Encryption: \x1b[38;5;220mACTIVE\x1b[0m");
-
             axum_server::bind_rustls(web_addr, config)
                 .serve(app.into_make_service())
                 .await?;
         } else {
             println!("\x1b[38;5;82m[LIVE]\x1b[0m Command Center: \x1b[1;38;5;45mhttp://localhost:{}/\x1b[0m", web_port);
-            println!("\x1b[38;5;45m[INFO]\x1b[0m SSL/TLS Encryption: \x1b[31mOFF\x1b[0m");
-            
             let listener = tokio::net::TcpListener::bind(&web_addr).await?;
             axum::serve(listener, app).await?;
         }
@@ -126,7 +123,67 @@ async fn handle_tcp_connection(
     user: String,
     pass: String,
 ) -> Result<()> {
-    let (reader, mut writer) = socket.split();
+    let mut buffer = [0u8; 8192];
+    let n = socket.peek(&mut buffer).await.unwrap_or(0);
+
+    if n > 4 {
+        if let Ok((msg, _)) = PgProtocolHandler::decode(&buffer[..n]) {
+            match msg {
+                PgMessage::SSLRequest | PgMessage::Startup { .. } => {
+                    return handle_pg_wire(socket, engine, tx, conn_id).await;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    handle_ksql_wire(socket, engine, tx, conn_id, user, pass).await
+}
+
+async fn handle_pg_wire(mut socket: TcpStream, engine: Arc<Engine>, tx: broadcast::Sender<String>, conn_id: u32) -> Result<()> {
+    let mut buffer = [0u8; 8192];
+    let _ = socket.read(&mut buffer).await?;
+
+    socket.write_all(&[b'R', 0, 0, 0, 8, 0, 0, 0, 0]).await?;
+    socket.write_all(&[b'Z', 0, 0, 0, 5, b'I']).await?;
+
+    loop {
+        let n = socket.read(&mut buffer).await?;
+        if n == 0 { break; }
+
+        if let Ok((msg, _)) = PgProtocolHandler::decode(&buffer[..n]) {
+            match msg {
+                PgMessage::Query(q) => {
+                    let _ = tx.send(q.clone());
+                    let result = match engine.execute(&q, conn_id).await {
+                        Ok(res) => res,
+                        Err(e) => format!("Error: {}", e),
+                    };
+                    socket.write_all(b"T").await?;
+                    socket.write_all(&result.as_bytes()).await?;
+                    socket.write_all(b"\n").await?;
+                    socket.write_all(&[b'C', 0, 0, 0, 9, b'S', b'E', b'L', b'E', b'C', b'T', 0]).await?;
+                    socket.write_all(&[b'Z', 0, 0, 0, 5, b'I']).await?;
+                }
+                PgMessage::Terminate => break,
+                _ => {
+                    socket.write_all(&[b'Z', 0, 0, 0, 5, b'I']).await?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn handle_ksql_wire(
+    socket: TcpStream,
+    engine: Arc<Engine>,
+    tx: broadcast::Sender<String>,
+    conn_id: u32,
+    user: String,
+    pass: String,
+) -> Result<()> {
+    let (reader, mut writer) = socket.into_split();
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
     let mut authenticated = false;

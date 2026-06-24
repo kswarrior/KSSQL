@@ -1,0 +1,68 @@
+name: Release Titan-Prime
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    name: Build for ${{ matrix.platform.os }}
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      matrix:
+        platform:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: linux-x64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            name: macos-x64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-x64
+
+    steps:
+      - name: Checkout Source
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
+
+      - name: Build Core
+        run: cargo build --release --bin ks-core --target ${{ matrix.platform.target }}
+
+      - name: Build Worker
+        run: cargo build --release --bin ks-worker --target ${{ matrix.platform.target }}
+
+      - name: Build Dashboard
+        run: cargo build --release --bin ks-dash --target ${{ matrix.platform.target }}
+
+      - name: Package Binaries (Unix)
+        if: matrix.platform.os != 'windows-latest'
+        run: |
+          mkdir -p package
+          cp target/${{ matrix.platform.target }}/release/ks-core package/
+          cp target/${{ matrix.platform.target }}/release/ks-worker package/
+          cp target/${{ matrix.platform.target }}/release/ks-dash package/
+          tar -czf ks-sql-${{ matrix.platform.name }}.tar.gz -C package .
+
+      - name: Package Binaries (Windows)
+        if: matrix.platform.os == 'windows-latest'
+        run: |
+          mkdir package
+          copy target\${{ matrix.platform.target }}\release\ks-core.exe package\
+          copy target\${{ matrix.platform.target }}\release\ks-worker.exe package\
+          copy target\${{ matrix.platform.target }}\release\ks-dash.exe package\
+          Compress-Archive -Path package\* -DestinationPath ks-sql-${{ matrix.platform.name }}.zip
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ks-sql-${{ matrix.platform.name }}.tar.gz
+            ks-sql-${{ matrix.platform.name }}.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

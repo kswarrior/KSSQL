@@ -44,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
     {
         let state = engine.state.clone();
         let mem = &state.btree.memory_tier;
-        let key = mem.cache.iter().next().unwrap().key().clone();
+        let key = mem.turbo_cache.iter().next().unwrap().key().clone();
         println!("Benchmarking with key: {}", String::from_utf8_lossy(&key));
         for _ in 0..iterations {
             let _ = mem.get(&key).unwrap();
