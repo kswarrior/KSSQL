@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    println!("Flushing WAL to NVMe for durability confirmation...");
+    println!("Flushing WAL to storage for durability confirmation...");
     engine.execute("FLUSH", 0).await?;
 
     let duration = start.elapsed();

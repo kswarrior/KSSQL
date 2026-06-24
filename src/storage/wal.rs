@@ -2,7 +2,6 @@ use crate::storage::pager::AlignedBuf;
 use anyhow::Result;
 use crossbeam::queue::ArrayQueue;
 use serde::{Deserialize, Serialize};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
@@ -80,40 +79,63 @@ impl Wal {
 
         let path_for_thread = path_owned.clone();
         std::thread::spawn(move || {
-            tokio_uring::start(async move {
-                let mut opts = std::fs::OpenOptions::new();
-                opts.read(true).write(true).create(true).append(true);
-                #[cfg(target_os = "linux")]
-                opts.custom_flags(libc::O_DIRECT | libc::O_DSYNC);
+            #[cfg(target_os = "linux")]
+            {
+                tokio_uring::start(async move {
+                    let mut opts = std::fs::OpenOptions::new();
+                    opts.read(true).write(true).create(true).append(true);
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        opts.custom_flags(libc::O_DIRECT | libc::O_DSYNC);
+                    }
 
-                let std_file = opts
-                    .open(&path_for_thread)
-                    .expect("Failed to open WAL file (O_DIRECT)");
-                let file = tokio_uring::fs::File::from_std(std_file);
-                let mut offset = std::fs::metadata(&path_for_thread).map(|m| m.len()).unwrap_or(0);
+                    let std_file = opts
+                        .open(&path_for_thread)
+                        .expect("Failed to open WAL file (O_DIRECT)");
+                    let file = tokio_uring::fs::File::from_std(std_file);
+                    let mut offset = std::fs::metadata(&path_for_thread).map(|m| m.len()).unwrap_or(0);
 
-                while let Some(req) = rx.recv().await {
-                    match req {
-                        WalRequest::Flush { batch } => {
-                            let size = batch.len();
-                            let padded_size = (size + 4095) & !4095;
-                            let mut aligned_buf = AlignedBuf::new(padded_size);
-                            {
-                                let slice = aligned_buf.as_mut_slice();
-                                slice[..size].copy_from_slice(&batch);
-                                if padded_size > size {
-                                    slice[size..padded_size].fill(0);
+                    while let Some(req) = rx.recv().await {
+                        match req {
+                            WalRequest::Flush { batch } => {
+                                let size = batch.len();
+                                let padded_size = (size + 4095) & !4095;
+                                let mut aligned_buf = AlignedBuf::new(padded_size);
+                                {
+                                    let slice = aligned_buf.as_mut_slice();
+                                    slice[..size].copy_from_slice(&batch);
+                                    if padded_size > size {
+                                        slice[size..padded_size].fill(0);
+                                    }
                                 }
-                            }
 
-                            let (res, _) = file.write_at(aligned_buf, offset).await;
-                            if let Ok(n) = res {
-                                offset += n as u64;
+                                let (res, _) = file.write_at(aligned_buf, offset).await;
+                                if let Ok(n) = res {
+                                    offset += n as u64;
+                                }
                             }
                         }
                     }
-                }
-            });
+                });
+            }
+
+            #[cfg(not(target_os = "linux"))]
+            {
+                let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+                rt.block_on(async move {
+                    use std::io::{Write, Seek, SeekFrom};
+                    let mut file = std::fs::OpenOptions::new().write(true).create(true).append(true).open(&path_for_thread).expect("Failed to open WAL");
+
+                    while let Some(req) = rx.recv().await {
+                        match req {
+                            WalRequest::Flush { batch } => {
+                                let _ = file.write_all(&batch);
+                                let _ = file.sync_all();
+                            }
+                        }
+                    }
+                });
+            }
         });
 
         Ok(Wal {

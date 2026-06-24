@@ -9,7 +9,8 @@ fn test_pager_u64_interface() {
     // We use a reasonable page_id but use u64 type explicitly
     let page_id: u64 = 1000;
 
-    tokio_uring::start(async move {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(async move {
         let pager = Pager::open(path).await.expect("Failed to open pager");
 
         let mut data = [0u8; 4096];
