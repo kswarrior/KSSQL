@@ -73,7 +73,9 @@ impl Server {
         });
 
         let app = Router::new()
-            .route("/", get(dashboard))
+            .route("/", get(terminal_page))
+            .route("/resilience", get(resilience_page))
+            .route("/telemetry", get(telemetry_page))
             .route("/ws", get(ws_handler))
             .route("/api/query", post(query_handler))
             .route("/api/undo", post(undo_handler))
@@ -255,10 +257,20 @@ async fn handle_ksql_wire(
     }
 }
 
-const DASHBOARD_HTML: &str = include_str!("dashboard.html");
+const TERMINAL_HTML: &str = include_str!("ui/terminal.html");
+const RESILIENCE_HTML: &str = include_str!("ui/resilience.html");
+const TELEMETRY_HTML: &str = include_str!("ui/telemetry.html");
 
-async fn dashboard() -> Html<&'static str> {
-    Html(DASHBOARD_HTML)
+async fn terminal_page() -> Html<&'static str> {
+    Html(TERMINAL_HTML)
+}
+
+async fn resilience_page() -> Html<&'static str> {
+    Html(RESILIENCE_HTML)
+}
+
+async fn telemetry_page() -> Html<&'static str> {
+    Html(TELEMETRY_HTML)
 }
 
 type AppState = (Arc<Engine>, broadcast::Sender<String>, String, String);

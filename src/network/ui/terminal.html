@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KS SQL | SQL Fabric</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #09090b; color: #f4f4f5; }
+        .glass-sidebar { background: rgba(9, 9, 11, 0.8); backdrop-filter: blur(16px); border-right: 1px solid #27272a; }
+        .nav-item { padding: 10px 16px; border-radius: 8px; margin: 4px 12px; color: #a1a1aa; transition: all 0.2s; font-size: 0.875rem; }
+        .nav-item:hover { background: #18181b; color: #fff; }
+        .nav-item.active { background: #27272a; color: #fff; font-weight: 500; }
+        .card { background: #18181b; border: 1px solid #27272a; border-radius: 12px; }
+        .btn-primary { background: #f4f4f5; color: #09090b; font-weight: 500; border-radius: 8px; }
+        .btn-primary:hover { opacity: 0.9; }
+    </style>
+</head>
+<body class="flex h-screen overflow-hidden">
+    <!-- SIDEBAR -->
+    <aside class="w-72 glass-sidebar flex flex-col hidden md:flex">
+        <div class="p-8 flex items-center gap-3">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-zinc-100"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+            <span class="text-xl font-bold tracking-tight">KS SQL</span>
+        </div>
+        <nav class="flex-grow mt-4">
+            <a href="/" class="nav-item active flex items-center gap-3">
+                <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>
+                Terminal
+            </a>
+            <a href="/resilience" class="nav-item flex items-center gap-3">
+                <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                Resilience
+            </a>
+            <a href="/telemetry" class="nav-item flex items-center gap-3">
+                <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+                Telemetry
+            </a>
+        </nav>
+        <div class="p-6 border-t border-[#27272a] space-y-4">
+            <input type="text" id="user" value="admin" class="w-full bg-black border border-[#27272a] rounded-lg p-2 text-xs text-zinc-400 outline-none focus:border-zinc-600">
+            <input type="password" id="pass" value="admin" class="w-full bg-black border border-[#27272a] rounded-lg p-2 text-xs text-zinc-400 outline-none focus:border-zinc-600">
+        </div>
+    </aside>
+
+    <!-- MAIN -->
+    <main class="flex-grow flex flex-col min-w-0">
+        <header class="h-16 border-b border-[#27272a] flex items-center justify-between px-8 bg-[#09090b]/50 backdrop-blur-md">
+            <div class="text-sm font-medium text-zinc-400">System / <span class="text-zinc-100">Terminal</span></div>
+            <div class="flex items-center gap-4">
+                <div class="flex items-center gap-2 text-[10px] text-zinc-500 font-bold uppercase tracking-wider">
+                    <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span> Engine Live
+                </div>
+            </div>
+        </header>
+        <div class="flex-grow overflow-y-auto p-8 lg:p-12">
+            <div class="max-w-5xl mx-auto space-y-8">
+                <div class="flex justify-between items-end">
+                    <div>
+                        <h2 class="text-3xl font-bold">SQL Fabric</h2>
+                        <p class="text-zinc-500 mt-1">High-throughput instruction layer.</p>
+                    </div>
+                    <div id="latency" class="card px-3 py-1.5 text-[10px] font-mono text-emerald-400">0.05ms</div>
+                </div>
+                <div class="card p-1">
+                    <textarea id="sql" class="w-full h-96 bg-zinc-950 text-zinc-100 font-mono text-sm p-6 outline-none rounded-lg resize-none" placeholder="-- Enter SQL command..."></textarea>
+                    <div class="p-4 flex justify-between items-center border-t border-zinc-800 bg-zinc-900/30 rounded-b-lg">
+                        <span class="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Shift + Enter to Execute</span>
+                        <button onclick="run()" class="btn-primary px-6 py-2 text-sm">Run Query</button>
+                    </div>
+                </div>
+                <div id="out" class="card p-8 min-h-32 font-mono text-xs text-zinc-400 overflow-x-auto whitespace-pre leading-relaxed border-l-4 border-l-zinc-800">READY_FOR_INPUT</div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        async function run() {
+            const sql = document.getElementById('sql').value;
+            if(!sql) return;
+            const user = document.getElementById('user').value;
+            const pass = document.getElementById('pass').value;
+            const out = document.getElementById('out');
+            out.innerHTML = "<span class='text-zinc-600 animate-pulse'>EXECUTING...</span>";
+            const start = performance.now();
+            const res = await fetch('/api/query', {
+                method: 'POST',
+                headers: { 'Authorization': `${user}:${pass}` },
+                body: sql
+            });
+            out.innerText = await res.text();
+            document.getElementById('latency').innerText = `${(performance.now() - start).toFixed(2)}ms`;
+        }
+        document.addEventListener('keydown', e => { if(e.shiftKey && e.key === 'Enter') run(); });
+    </script>
+</body>
+</html>
