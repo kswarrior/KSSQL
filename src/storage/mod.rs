@@ -10,8 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use chrono::Utc;
 use rand::seq::IteratorRandom;
-use std::collections::BTreeMap;
-use tokio::sync::RwLock;
+use crossbeam_skiplist::SkipMap;
 
 #[derive(Clone)]
 pub struct MemoryMetrics {
@@ -25,48 +24,48 @@ pub struct LruEntry {
     pub priority: u32,
 }
 
-/// LSM-Tree MemTable Foundation
 pub struct MemTable {
-    pub table: RwLock<BTreeMap<Vec<u8>, Vec<u8>>>,
+    pub map: SkipMap<Vec<u8>, Vec<u8>>,
     pub size: AtomicU64,
 }
 
 impl MemTable {
     pub fn new() -> Self {
         Self {
-            table: RwLock::new(BTreeMap::new()),
+            map: SkipMap::new(),
             size: AtomicU64::new(0),
         }
     }
 
-    pub async fn insert(&self, key: Vec<u8>, value: Vec<u8>) {
-        let mut t = self.table.write().await;
+    pub fn insert(&self, key: Vec<u8>, value: Vec<u8>) {
         self.size.fetch_add((key.len() + value.len()) as u64, Ordering::Relaxed);
-        t.insert(key, value);
+        self.map.insert(key, value);
     }
 
-    pub async fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-        let t = self.table.read().await;
-        t.get(key).cloned()
+    pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+        self.map.get(key).map(|entry| entry.value().clone())
     }
 }
 
-/// A tiered memory management system for ultra-scale HTAP workloads
 pub struct TieredMemory {
-    pub turbo_cache: DashMap<Vec<u8>, Vec<u8>>,      // KV records (40%)
-    pub index_cache: DashMap<Vec<u8>, Vec<u8>>,      // SSTable / Index metadata (20%)
-    pub columnar_cache: DashMap<Vec<u8>, Vec<u8>>,   // HTAP Vectorized Chunks (30%)
+    pub turbo_cache: Vec<DashMap<Vec<u8>, Vec<u8>>>, // 64-way sharded
+    pub index_cache: DashMap<Vec<u8>, Vec<u8>>,
+    pub columnar_cache: DashMap<Vec<u8>, Vec<u8>>,
     pub lru: DashMap<Vec<u8>, LruEntry>,
     pub metrics: MemoryMetrics,
     pub turbo_mode: Arc<AtomicU64>,
     pub max_ram_mb: Arc<AtomicU64>,
     pub memtable: Arc<MemTable>,
+    pub dirty_pages: DashMap<u64, Vec<u8>>,
+    pub turbo_len: AtomicU64,
 }
 
 impl TieredMemory {
     pub fn new(max_ram_mb: u64) -> Self {
+        let mut turbo = Vec::with_capacity(64);
+        for _ in 0..64 { turbo.push(DashMap::with_capacity(16384)); }
         Self {
-            turbo_cache: DashMap::new(),
+            turbo_cache: turbo,
             index_cache: DashMap::new(),
             columnar_cache: DashMap::new(),
             lru: DashMap::new(),
@@ -77,22 +76,26 @@ impl TieredMemory {
             turbo_mode: Arc::new(AtomicU64::new(0)),
             max_ram_mb: Arc::new(AtomicU64::new(max_ram_mb)),
             memtable: Arc::new(MemTable::new()),
+            dirty_pages: DashMap::new(),
+            turbo_len: AtomicU64::new(0),
         }
     }
 
-    /// Autopilot PID-based memory rebalancing logic foundation
-    pub fn autopilot_rebalance(&self) {
-        let hits = self.metrics.hits.load(Ordering::Relaxed);
-        let misses = self.metrics.misses.load(Ordering::Relaxed);
-        let total = hits + misses;
-        if total > 1000 {
-             // Dynamic adjustment of cache targets would happen here
-             // e.g., if index misses are high, increase index_cache budget
-        }
+    #[inline(always)]
+    fn get_shard(&self, key: &[u8]) -> usize {
+        let mut h = 0u64;
+        for &b in key { h = h.wrapping_mul(31).wrapping_add(b as u64); }
+        (h % 64) as usize
     }
 
     pub fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
-        if let Some(val) = self.turbo_cache.get(key) {
+        // Fast MemTable Check
+        if let Some(val) = self.memtable.get(key) {
+            return Some(val);
+        }
+
+        let shard = self.get_shard(key);
+        if let Some(val) = self.turbo_cache[shard].get(key) {
              self.hit(key);
              return Some(val.clone());
         }
@@ -114,43 +117,56 @@ impl TieredMemory {
 
     fn hit(&self, key: &[u8]) {
         self.metrics.hits.fetch_add(1, Ordering::Relaxed);
-        if let Some(mut entry) = self.lru.get_mut(key) {
-            entry.timestamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+        // Extremely Sampled LRU
+        if self.metrics.hits.load(Ordering::Relaxed) % 1024 == 0 {
+            if let Some(mut entry) = self.lru.get_mut(key) {
+                entry.timestamp = Utc::now().timestamp_nanos_opt().unwrap_or(0);
+            }
         }
     }
 
     pub fn insert(&self, key: Vec<u8>, value: Vec<u8>) {
-        self.insert_with_priority(key, value, 0);
+        let shard = self.get_shard(&key);
+        if self.turbo_cache[shard].insert(key, value).is_none() {
+            self.turbo_len.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     pub fn insert_kv(&self, key: Vec<u8>, value: Vec<u8>) {
         self.insert(key, value);
     }
 
+    pub fn insert_batch(&self, entries: Vec<(Vec<u8>, Vec<u8>)>) {
+        for (key, value) in entries {
+            self.insert(key, value);
+        }
+    }
+
     pub fn insert_with_priority(&self, key: Vec<u8>, value: Vec<u8>, priority: u32) {
-        // Namespace mapping:
-        // 0xFF: Index Cache
-        // 0xFE: Columnar Chunk Cache
-        // others: Turbo Cache (KV)
-        let pool = if key.starts_with(&[0xFF]) {
-            &self.index_cache
-        } else if key.starts_with(&[0xFE]) {
-            &self.columnar_cache
-        } else {
-            &self.turbo_cache
-        };
-        
-        let max_bytes = self.max_ram_mb.load(Ordering::Relaxed) * 1024 * 1024;
-        let current_entries = self.turbo_cache.len() + self.index_cache.len() + self.columnar_cache.len();
-        if current_entries as u64 * 256 > max_bytes {
-            self.evict_lru(current_entries / 10);
+        let total_ops = self.metrics.hits.load(Ordering::Relaxed) + self.metrics.misses.load(Ordering::Relaxed);
+
+        if total_ops % 8192 == 0 {
+            let max_bytes = self.max_ram_mb.load(Ordering::Relaxed) * 1024 * 1024;
+            let total_len = self.turbo_len.load(Ordering::Relaxed) + self.index_cache.len() as u64 + self.columnar_cache.len() as u64;
+            if total_len * 256 > max_bytes {
+                self.evict_lru((total_len / 10) as usize);
+            }
         }
 
-        self.lru.insert(key.clone(), LruEntry {
-            timestamp: Utc::now().timestamp_nanos_opt().unwrap_or(0),
-            priority,
-        });
-        pool.insert(key, value);
+        if total_ops % 128 == 0 {
+            self.lru.insert(key.clone(), LruEntry {
+                timestamp: Utc::now().timestamp_nanos_opt().unwrap_or(0),
+                priority,
+            });
+        }
+
+        if key.starts_with(&[0xFF]) {
+            self.index_cache.insert(key, value);
+        } else if key.starts_with(&[0xFE]) {
+            self.columnar_cache.insert(key, value);
+        } else {
+            self.insert(key, value);
+        }
     }
 
     fn evict_lru(&self, count: usize) {
@@ -172,22 +188,23 @@ impl TieredMemory {
 
         for i in 0..count.min(items.len()) {
             let key = &items[i].0;
-            self.turbo_cache.remove(key);
-            self.index_cache.remove(key);
-            self.columnar_cache.remove(key);
-            self.lru.remove(key);
+            self.remove(key);
         }
     }
 
     pub fn remove(&self, key: &[u8]) {
-        self.turbo_cache.remove(key);
+        let shard = self.get_shard(key);
+        if self.turbo_cache[shard].remove(key).is_some() {
+            self.turbo_len.fetch_sub(1, Ordering::Relaxed);
+        }
         self.index_cache.remove(key);
         self.columnar_cache.remove(key);
         self.lru.remove(key);
     }
 
     pub fn clear(&self) {
-        self.turbo_cache.clear();
+        for s in &self.turbo_cache { s.clear(); }
+        self.turbo_len.store(0, Ordering::Relaxed);
         self.index_cache.clear();
         self.columnar_cache.clear();
         self.lru.clear();
@@ -201,7 +218,6 @@ impl TieredMemory {
     }
 }
 
-// Keeping MemoryTier as a compatibility alias
 pub type MemoryTier = TieredMemory;
 
 pub struct HardwareSpecs {

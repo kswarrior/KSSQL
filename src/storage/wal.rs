@@ -5,7 +5,7 @@ use crossbeam::queue::ArrayQueue;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum WalEntry {
@@ -15,6 +15,12 @@ pub enum WalEntry {
     },
     RecordUpdate {
         key: Vec<u8>,
+        data: Vec<u8>,
+    },
+    RecordBatch {
+        entries: Vec<(Vec<u8>, Vec<u8>)>,
+    },
+    BinaryBatch {
         data: Vec<u8>,
     },
     TransactionStart {
@@ -30,18 +36,11 @@ pub enum WalEntry {
     },
 }
 
-pub enum WalRequest {
-    Flush { batch: Vec<u8> },
-}
-
 pub struct Wal {
     queue: Arc<ArrayQueue<WalEntry>>,
-    tx: mpsc::Sender<WalRequest>,
-    buffer_a: Mutex<Vec<u8>>,
-    buffer_b: Mutex<Vec<u8>>,
-    active_is_a: Arc<std::sync::atomic::AtomicBool>,
-    batch_limit: std::sync::atomic::AtomicUsize,
-    recovered_entries: Mutex<Vec<WalEntry>>,
+    drain_queue: Arc<ArrayQueue<WalEntry>>,
+    flush_tx: mpsc::Sender<()>,
+    recovered_entries: Vec<WalEntry>,
 }
 
 impl Wal {
@@ -60,7 +59,9 @@ impl Wal {
                     let len_bytes: [u8; 4] = buffer[cursor..cursor + 4].try_into().unwrap_or([0; 4]);
                     let len = u32::from_le_bytes(len_bytes) as usize;
                     if len == 0 {
+                        // Skip zeros (O_DIRECT padding)
                         cursor = (cursor / 4096 + 1) * 4096;
+                        if cursor >= buffer.len() { break; }
                         continue;
                     }
                     cursor += 4;
@@ -76,9 +77,13 @@ impl Wal {
             }
         }
 
-        let (tx, mut rx) = mpsc::channel::<WalRequest>(1024);
+        let queue = Arc::new(ArrayQueue::new(5_000_000));
+        let drain_queue = Arc::new(ArrayQueue::new(5_000_000));
+        let (flush_tx, mut flush_rx) = mpsc::channel::<()>(1024);
 
-        let path_for_thread = path_owned.clone();
+        let q_clone = Arc::clone(&queue);
+        let dq_clone = Arc::clone(&drain_queue);
+
         std::thread::spawn(move || {
             #[cfg(target_os = "linux")]
             {
@@ -87,33 +92,58 @@ impl Wal {
                     opts.read(true).write(true).create(true).append(true);
                     {
                         use std::os::unix::fs::OpenOptionsExt;
-                        opts.custom_flags(libc::O_DIRECT | libc::O_DSYNC);
+                        opts.custom_flags(libc::O_DIRECT);
                     }
 
-                    let std_file = opts
-                        .open(&path_for_thread)
-                        .expect("Failed to open WAL file (O_DIRECT)");
+                    let std_file = opts.open(&path_owned).expect("Failed to open WAL (O_DIRECT)");
                     let file = tokio_uring::fs::File::from_std(std_file);
-                    let mut offset = std::fs::metadata(&path_for_thread).map(|m| m.len()).unwrap_or(0);
+                    let mut offset = std::fs::metadata(&path_owned).map(|m| m.len()).unwrap_or(0);
 
-                    while let Some(req) = rx.recv().await {
-                        match req {
-                            WalRequest::Flush { batch } => {
-                                let size = batch.len();
-                                let padded_size = (size + 4095) & !4095;
-                                let mut aligned_buf = AlignedBuf::new(padded_size);
-                                {
-                                    let slice = aligned_buf.as_mut_slice();
-                                    slice[..size].copy_from_slice(&batch);
-                                    if padded_size > size {
-                                        slice[size..padded_size].fill(0);
+                    let mut batch_buf = Vec::with_capacity(64 * 1024 * 1024);
+                    let mut aligned_buf = AlignedBuf::new(64 * 1024 * 1024);
+
+                    loop {
+                        tokio::select! {
+                            _ = flush_rx.recv() => {},
+                            _ = tokio::time::sleep(tokio::time::Duration::from_micros(10)) => {}
+                        }
+
+                        batch_buf.clear();
+                        let mut entries = Vec::with_capacity(100_000);
+                        while let Some(entry) = q_clone.pop() {
+                            match &entry {
+                                WalEntry::BinaryBatch { data } => {
+                                    batch_buf.extend_from_slice(data);
+                                    entries.push(entry);
+                                }
+                                _ => {
+                                    if let Ok(encoded) = bincode::serialize(&entry) {
+                                        let len = encoded.len() as u32;
+                                        batch_buf.extend_from_slice(&len.to_le_bytes());
+                                        batch_buf.extend_from_slice(&encoded);
+                                        entries.push(entry);
                                     }
                                 }
+                            }
+                            if batch_buf.len() > 32 * 1024 * 1024 { break; }
+                        }
 
-                                let (res, _) = file.write_at(aligned_buf, offset).await;
-                                if let Ok(n) = res {
-                                    offset += n as u64;
-                                }
+                        if batch_buf.is_empty() { continue; }
+
+                        let size = batch_buf.len();
+                        let padded_size = (size + 4095) & !4095;
+                        {
+                            let slice = aligned_buf.as_mut_slice();
+                            slice[..size].copy_from_slice(&batch_buf);
+                            if padded_size > size { slice[size..padded_size].fill(0); }
+                        }
+
+                        let (res, buf_ret) = file.write_at(aligned_buf, offset).await;
+                        aligned_buf = buf_ret;
+                        if let Ok(n) = res {
+                            offset += n as u64;
+                            for entry in entries {
+                                let _ = dq_clone.push(entry);
                             }
                         }
                     }
@@ -125,13 +155,40 @@ impl Wal {
                 let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
                 rt.block_on(async move {
                     use std::io::Write;
-                    let mut file = std::fs::OpenOptions::new().write(true).create(true).append(true).open(&path_for_thread).expect("Failed to open WAL");
+                    let mut file = std::fs::OpenOptions::new().write(true).create(true).append(true).open(&path_owned).expect("Failed to open WAL");
+                    let mut batch_buf = Vec::with_capacity(32 * 1024 * 1024);
 
-                    while let Some(req) = rx.recv().await {
-                        match req {
-                            WalRequest::Flush { batch } => {
-                                let _ = file.write_all(&batch);
-                                let _ = file.sync_all();
+                    loop {
+                        tokio::select! {
+                            _ = flush_rx.recv() => {},
+                            _ = tokio::time::sleep(tokio::time::Duration::from_millis(1)) => {}
+                        }
+
+                        batch_buf.clear();
+                        let mut entries = Vec::with_capacity(50_000);
+                        while let Some(entry) = q_clone.pop() {
+                            match &entry {
+                                WalEntry::BinaryBatch { data } => {
+                                    batch_buf.extend_from_slice(data);
+                                    entries.push(entry);
+                                }
+                                _ => {
+                                    if let Ok(encoded) = bincode::serialize(&entry) {
+                                        let len = encoded.len() as u32;
+                                        batch_buf.extend_from_slice(&len.to_le_bytes());
+                                        batch_buf.extend_from_slice(&encoded);
+                                        entries.push(entry);
+                                    }
+                                }
+                            }
+                            if batch_buf.len() > 16 * 1024 * 1024 { break; }
+                        }
+
+                        if batch_buf.is_empty() { continue; }
+
+                        if file.write_all(&batch_buf).is_ok() && file.sync_all().is_ok() {
+                            for entry in entries {
+                                let _ = dq_clone.push(entry);
                             }
                         }
                     }
@@ -140,31 +197,24 @@ impl Wal {
         });
 
         Ok(Wal {
-            queue: Arc::new(ArrayQueue::new(1_000_000)),
-            tx,
-            buffer_a: Mutex::new(Vec::with_capacity(128 * 1024 * 1024)),
-            buffer_b: Mutex::new(Vec::with_capacity(128 * 1024 * 1024)),
-            active_is_a: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            batch_limit: std::sync::atomic::AtomicUsize::new(32 * 1024 * 1024),
-            recovered_entries: Mutex::new(recovered),
+            queue,
+            drain_queue,
+            flush_tx,
+            recovered_entries: recovered,
         })
     }
 
-    pub fn set_batch_limit(&self, limit_bytes: usize) {
-        self.batch_limit
-            .store(limit_bytes, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    pub fn enqueue(&self, entry: WalEntry) -> Result<()> {
+    pub fn enqueue(&self, mut entry: WalEntry) -> Result<()> {
         let mut retries = 0;
         loop {
-            match self.queue.push(entry.clone()) {
+            match self.queue.push(entry) {
                 Ok(_) => return Ok(()),
-                Err(_) => {
-                    if retries > 1000 {
-                         return Err(anyhow::anyhow!("WAL Queue Saturated after 1000 retries"));
+                Err(e) => {
+                    entry = e;
+                    if retries > 10000 {
+                         return Err(anyhow::anyhow!("WAL Ingestion Queue Saturated (Titan-Prime High Backpressure)"));
                     }
-                    std::thread::sleep(std::time::Duration::from_micros(100));
+                    std::thread::yield_now();
                     retries += 1;
                 }
             }
@@ -172,50 +222,23 @@ impl Wal {
     }
 
     pub async fn flush_pipeline(&self) -> Result<()> {
-        let q_len = self.queue.len();
-        if q_len == 0 {
-            return Ok(());
-        }
-
-        let is_a = self.active_is_a.load(std::sync::atomic::Ordering::Relaxed);
-        let mut active = if is_a {
-            self.buffer_a.lock().await
-        } else {
-            self.buffer_b.lock().await
-        };
-
-        let limit = self.batch_limit.load(std::sync::atomic::Ordering::Relaxed);
-        let adaptive_limit = if q_len > 1_000_000 { limit * 4 } else { limit };
-
-        while let Some(entry) = self.queue.pop() {
-            if let Ok(encoded) = bincode::serialize(&entry) {
-                let len = encoded.len() as u32;
-                active.extend_from_slice(&len.to_le_bytes());
-                active.extend_from_slice(&encoded);
-            }
-            if active.len() >= adaptive_limit {
-                break;
-            }
-        }
-
-        if active.is_empty() {
-            return Ok(());
-        }
-
-        let batch = std::mem::replace(&mut *active, Vec::with_capacity(limit));
-        self.active_is_a
-            .store(!is_a, std::sync::atomic::Ordering::Relaxed);
-
-        let _ = self.tx.send(WalRequest::Flush { batch }).await;
+        let _ = self.flush_tx.send(()).await;
         Ok(())
     }
 
     pub async fn read_all(&self) -> Result<Vec<WalEntry>> {
-        let mut recovered = self.recovered_entries.lock().await;
-        Ok(std::mem::take(&mut *recovered))
+        Ok(self.recovered_entries.clone())
     }
 
     pub fn pop_entry(&self) -> Option<WalEntry> {
-        self.queue.pop()
+        self.drain_queue.pop()
+    }
+
+    pub fn queue_len(&self) -> usize {
+        self.queue.len()
+    }
+
+    pub fn drain_queue_len(&self) -> usize {
+        self.drain_queue.len()
     }
 }

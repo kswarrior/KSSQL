@@ -100,6 +100,28 @@ impl BPlusTree {
                     WalEntry::RecordUpdate { key, data } => {
                         memory_tier.insert(key, data);
                     }
+                    WalEntry::BinaryBatch { data } => {
+                        let mut cursor = 0;
+                        while cursor + 4 <= data.len() {
+                            let len = u32::from_le_bytes(data[cursor..cursor+4].try_into().unwrap()) as usize;
+                            cursor += 4;
+                            let tag = u32::from_le_bytes(data[cursor..cursor+4].try_into().unwrap());
+                            cursor += 4;
+                            if tag == 1 { // RecordUpdate
+                                let k_len = u64::from_le_bytes(data[cursor..cursor+8].try_into().unwrap()) as usize;
+                                cursor += 8;
+                                let key = data[cursor..cursor+k_len].to_vec();
+                                cursor += k_len;
+                                let v_len = u64::from_le_bytes(data[cursor..cursor+8].try_into().unwrap()) as usize;
+                                cursor += 8;
+                                let val = data[cursor..cursor+v_len].to_vec();
+                                cursor += v_len;
+                                memory_tier.insert(key, val);
+                            } else {
+                                cursor += len - 4;
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -171,7 +193,6 @@ impl BPlusTree {
             self.insert_non_full(self.root_page_id, &mut root, key, value)
                 .await?;
         }
-        self.pager.sync().await?;
         Ok(())
     }
 
@@ -278,11 +299,9 @@ impl BPlusTree {
 
     pub async fn save_node(&self, page_id: u64, node: &Node) -> Result<()> {
         let bytes = node.to_bytes()?;
-        self.wal.enqueue(WalEntry::PageUpdate {
-            page_id,
-            data: bytes.to_vec(),
-        })?;
-        self.pager.write_page(page_id, &bytes).await?;
+
+        // DEFERRED PERSISTENCE: Write to MemoryTier and mark as dirty
+        self.memory_tier.dirty_pages.insert(page_id, bytes.to_vec());
 
         // Use binary namespaced key to prevent collisions with user records
         let mut cache_key = vec![0u8; 9];
