@@ -55,10 +55,13 @@ impl PgProtocolHandler {
                 Ok((PgMessage::Query(query), 1 + msg_len))
             }
             'X' => Ok((PgMessage::Terminate, 1 + msg_len)),
-            'S' => Ok((PgMessage::Sync, 1 + msg_len)),
+            'S' | 'H' => Ok((PgMessage::Sync, 1 + msg_len)),
             'p' => {
                 let pass = String::from_utf8_lossy(&buffer[5..1 + msg_len - 1]).to_string();
                 Ok((PgMessage::PasswordMessage(pass), 1 + msg_len))
+            }
+            'P' | 'B' | 'D' | 'E' => {
+                Ok((PgMessage::Sync, 1 + msg_len))
             }
             _ => Err(anyhow::anyhow!("Unsupported PG tag: {}", tag)),
         }

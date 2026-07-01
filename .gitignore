@@ -1,1 +1,6 @@
 /target
+**/node_modules/
+*.ksql
+*.wal
+test_results.txt
+test_output.log

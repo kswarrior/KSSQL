@@ -164,47 +164,107 @@ async fn handle_pg_wire(mut socket: TcpStream, engine: Arc<Engine>, tx: broadcas
         }
     }
 
-    // Authentication OK + ReadyForQuery
+    // Authentication OK
     socket.write_all(&[b'R', 0, 0, 0, 8, 0, 0, 0, 0]).await?;
+
+    // ParameterStatus messages (standard for PG clients)
+    let params = vec![
+        ("server_version", "1.1.0"),
+        ("client_encoding", "UTF8"),
+        ("DateStyle", "ISO"),
+    ];
+    for (k, v) in params {
+        let mut p_buf = Vec::new();
+        p_buf.push(b'S');
+        let msg_len = (k.len() + v.len() + 6) as i32;
+        p_buf.extend_from_slice(&msg_len.to_be_bytes());
+        p_buf.extend_from_slice(k.as_bytes());
+        p_buf.push(0);
+        p_buf.extend_from_slice(v.as_bytes());
+        p_buf.push(0);
+        socket.write_all(&p_buf).await?;
+    }
+
+    // BackendKeyData
+    let mut k_buf = Vec::new();
+    k_buf.push(b'K');
+    k_buf.extend_from_slice(&12i32.to_be_bytes());
+    k_buf.extend_from_slice(&std::process::id().to_be_bytes());
+    k_buf.extend_from_slice(&1234u32.to_be_bytes());
+    socket.write_all(&k_buf).await?;
+
+    // ReadyForQuery
     socket.write_all(&[b'Z', 0, 0, 0, 5, b'I']).await?;
 
+    let mut offset = 0;
+    let mut total_read = 0;
     loop {
-        let n = socket.read(&mut buffer).await?;
-        if n == 0 { break; }
+        if offset >= total_read {
+            offset = 0;
+            total_read = socket.read(&mut buffer).await?;
+            if total_read == 0 { break; }
+        }
 
-        if let Ok((msg, _)) = PgProtocolHandler::decode(&buffer[..n]) {
-            match msg {
-                PgMessage::Query(q) => {
-                    let _ = tx.send(q.clone());
-                    match engine.execute(&q, conn_id).await {
-                        Ok(res) => {
-                            let lines: Vec<&str> = res.split('\n').collect();
-                            if lines.len() > 1 && lines[0].contains('|') {
-                                // Result set (Table)
-                                let cols: Vec<String> = lines[0].split('|').map(|s| s.trim().to_string()).collect();
-                                socket.write_all(&PgProtocolHandler::encode_row_description(&cols)).await?;
-                                for line in &lines[2..] {
-                                    if line.trim().is_empty() { continue; }
-                                    let vals: Vec<String> = line.split('|').map(|s| s.trim().to_string()).collect();
-                                    socket.write_all(&PgProtocolHandler::encode_data_row(&vals)).await?;
+        match PgProtocolHandler::decode(&buffer[offset..total_read]) {
+            Ok((msg, size)) => {
+                offset += size;
+                match msg {
+                    PgMessage::Query(q) => {
+                        let _ = tx.send(q.clone());
+                        let mut tag = "SELECT".to_string();
+                        match engine.execute(&q, conn_id).await {
+                            Ok(res) => {
+                                let lines: Vec<&str> = res.split('\n').collect();
+                                if lines.len() > 1 && lines[1].starts_with('-') {
+                                    // Result set (Table)
+                                    let cols: Vec<String> = lines[0].split('|').map(|s| s.trim().to_string()).collect();
+                                    socket.write_all(&PgProtocolHandler::encode_row_description(&cols)).await?;
+                                    for line in &lines[2..] {
+                                        if line.trim().is_empty() { continue; }
+                                        let vals: Vec<String> = line.split('|').map(|s| s.trim().to_string()).collect();
+                                        socket.write_all(&PgProtocolHandler::encode_data_row(&vals)).await?;
+                                    }
+                                    tag = "SELECT".to_string();
+                                } else {
+                                    // Command response (e.g. "Inserted 1 rows")
+                                    if res.to_uppercase().contains("INSERTED") {
+                                        let count = res.split_whitespace().nth(1).unwrap_or("1");
+                                        tag = format!("INSERT 0 {}", count);
+                                    } else if res.to_uppercase().contains("CREATED") {
+                                        tag = "CREATE TABLE".to_string();
+                                    } else if res.to_uppercase().contains("DELETED") {
+                                        let count = res.split_whitespace().nth(1).unwrap_or("0");
+                                        tag = format!("DELETE {}", count);
+                                    } else {
+                                        tag = "SELECT".to_string();
+                                    }
                                 }
-                            } else {
-                                // Command response (e.g. "Inserted 1 rows")
                             }
-                        }
-                        Err(e) => {
-                            let err_msg = format!("Error: {}", e);
-                            socket.write_all(&PgProtocolHandler::encode_data_row(&[err_msg])).await?;
-                        }
-                    };
-                    socket.write_all(&[b'C', 0, 0, 0, 9, b'S', b'E', b'L', b'E', b'C', b'T', 0]).await?;
-                    socket.write_all(&[b'Z', 0, 0, 0, 5, b'I']).await?;
-                }
-                PgMessage::Terminate => break,
-                _ => {
-                    socket.write_all(&[b'Z', 0, 0, 0, 5, b'I']).await?;
+                            Err(e) => {
+                                let err_msg = format!("Error: {}", e);
+                                socket.write_all(&PgProtocolHandler::encode_data_row(&[err_msg])).await?;
+                            }
+                        };
+                        // CommandComplete
+                        let mut c_msg = Vec::new();
+                        c_msg.push(b'C');
+                        let tag_bytes = tag.as_bytes();
+                        let c_len = (tag_bytes.len() + 5) as i32;
+                        c_msg.extend_from_slice(&c_len.to_be_bytes());
+                        c_msg.extend_from_slice(tag_bytes);
+                        c_msg.push(0);
+                        socket.write_all(&c_msg).await?;
+
+                        // ReadyForQuery
+                        socket.write_all(&[b'Z', 0, 0, 0, 5, b'I']).await?;
+                    }
+                    PgMessage::Terminate => break,
+                    _ => {
+                        socket.write_all(&[b'Z', 0, 0, 0, 5, b'I']).await?;
+                    }
                 }
             }
+            Err(_) => break,
         }
     }
     Ok(())

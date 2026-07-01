@@ -352,6 +352,26 @@ impl Engine {
     async fn handle_query(&self, query: Query, conn_id: u32) -> Result<String> {
         let version = self.active_transactions.get(&conn_id).map(|tx| tx.snapshot_version).unwrap_or(self.state.current_version.load(std::sync::atomic::Ordering::SeqCst));
         if let SetExpr::Select(select) = &*query.body {
+            if select.from.is_empty() {
+                let mut rcols = Vec::new();
+                let mut results = Vec::new();
+                for proj in &select.projection {
+                    match proj {
+                        sqlparser::ast::SelectItem::UnnamedExpr(expr) => {
+                            rcols.push(expr.to_string());
+                            results.push(expr.to_string());
+                        }
+                        sqlparser::ast::SelectItem::ExprWithAlias { expr, alias } => {
+                            rcols.push(alias.to_string());
+                            results.push(expr.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+                let mut output = rcols.join(" | ") + "\n" + &"-".repeat(rcols.join(" | ").len()) + "\n";
+                output += &(results.join(" | ") + "\n");
+                return Ok(output);
+            }
             let tname = match &select.from[0].relation { TableFactor::Table { name, .. } => name.to_string(), _ => return Err(anyhow!("Unsupported")) };
             let schema = self.state.schemas.get(&tname).ok_or_else(|| anyhow!("Not found"))?.clone();
             let mut rows = self.scan_table_with_filter(&self.state, &tname, version, select.selection.as_ref()).await?;
@@ -382,7 +402,18 @@ impl Engine {
             }
             let mut output = dcols.join(" | ") + "\n" + &"-".repeat(dcols.join(" | ").len()) + "\n";
             rows.sort_by_key(|r| r.get("__key__").cloned().unwrap_or_default());
-            for row in rows {
+
+            // Apply OFFSET and LIMIT
+            let offset = query.offset.map(|o| match o.value {
+                Expr::Value(sqlparser::ast::Value::Number(n, _)) => n.parse::<usize>().unwrap_or(0),
+                _ => 0
+            }).unwrap_or(0);
+            let limit = query.limit.map(|l| match l {
+                Expr::Value(sqlparser::ast::Value::Number(n, _)) => n.parse::<usize>().unwrap_or(usize::MAX),
+                _ => usize::MAX
+            }).unwrap_or(usize::MAX);
+
+            for row in rows.into_iter().skip(offset).take(limit) {
                 let mut vals = Vec::new();
                 for c in &dcols {
                     let mut val = row.get(c).cloned();
@@ -401,8 +432,40 @@ impl Engine {
     async fn scan_table(&self, state: &EngineState, tname: &str, version: u64) -> Result<Vec<HashMap<String, String>>> { self.scan_table_with_filter(state, tname, version, None).await }
 
     async fn scan_table_with_filter(&self, state: &EngineState, tname: &str, version: u64, filter: Option<&Expr>) -> Result<Vec<HashMap<String, String>>> {
-        let prefix = format!("{}:", tname); let mut rows = Vec::new(); let mut processed = std::collections::HashSet::new();
         let schema = state.schemas.get(tname).ok_or_else(|| anyhow!("Schema missing: {}", tname))?.clone();
+
+        // FAST PATH: Direct B+Tree lookup for primary key equality
+        if let Some(Expr::BinaryOp { left, op: BinaryOperator::Eq, right }) = filter {
+            let pk = schema.auto_increment_col.as_deref().unwrap_or("id");
+            let mut target_id = None;
+            let left_s = left.to_string().replace("'", "");
+            let right_s = right.to_string().replace("'", "");
+
+            if left_s == pk || left_s == format!("{}.{}", tname, pk) {
+                if let Expr::Value(sqlparser::ast::Value::Number(n, _)) = &**right { target_id = Some(n.clone()); }
+                else if let Expr::Value(sqlparser::ast::Value::SingleQuotedString(s)) = &**right { target_id = Some(s.clone()); }
+            } else if right_s == pk || right_s == format!("{}.{}", tname, pk) {
+                if let Expr::Value(sqlparser::ast::Value::Number(n, _)) = &**left { target_id = Some(n.clone()); }
+                else if let Expr::Value(sqlparser::ast::Value::SingleQuotedString(s)) = &**left { target_id = Some(s.clone()); }
+            }
+
+            if let Some(id) = target_id {
+                let key = format!("{}:{}", tname, id).into_bytes();
+                if let Some(data) = state.btree.memory_tier.get(&key).or(state.btree.get(&key).await?) {
+                    let rec: Record = bincode::deserialize(&data)?;
+                    if rec.version <= version && !rec.is_deleted {
+                        let rvec: Vec<String> = match bincode::deserialize::<Vec<String>>(&rec.value) { Ok(v) => v, Err(_) => { let map: HashMap<String, String> = bincode::deserialize(&rec.value)?; schema.columns.iter().map(|c| map.get(c).cloned().unwrap_or_default()).collect() } };
+                        let mut row = HashMap::new();
+                        row.insert("__key__".to_string(), String::from_utf8_lossy(&key).to_string());
+                        for (i, v) in rvec.into_iter().enumerate() { if i < schema.columns.len() { let k = &schema.columns[i]; row.insert(k.clone(), v.clone()); row.insert(format!("{}.{}", tname, k), v); } }
+                        return Ok(vec![row]);
+                    }
+                }
+                return Ok(vec![]);
+            }
+        }
+
+        let prefix = format!("{}:", tname); let mut rows = Vec::new(); let mut processed = std::collections::HashSet::new();
         let mut add_row = |key: &[u8], val: &[u8], rows: &mut Vec<HashMap<String, String>>| -> Result<()> {
             if processed.contains(key) { return Ok(()); }
             let rec: Record = match bincode::deserialize::<Record>(val) {
