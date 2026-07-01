@@ -18,6 +18,24 @@
     </style>
 </head>
 <body class="flex h-screen overflow-hidden">
+    <!-- MOBILE NAV -->
+    <div id="mobile-nav" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 hidden md:hidden">
+        <div class="w-72 h-full glass-sidebar flex flex-col">
+            <div class="p-8 flex items-center justify-between">
+                <div class="flex items-center gap-3">
+                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-zinc-100"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                    <span class="text-xl font-bold tracking-tight">KS SQL</span>
+                </div>
+                <button onclick="toggleNav()" class="text-zinc-400"><svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            </div>
+            <nav class="flex-grow mt-4">
+                <a href="/" class="nav-item flex items-center gap-3">Terminal</a>
+                <a href="/resilience" class="nav-item active flex items-center gap-3">Resilience</a>
+                <a href="/telemetry" class="nav-item flex items-center gap-3">Telemetry</a>
+            </nav>
+        </div>
+    </div>
+
     <!-- SIDEBAR -->
     <aside class="w-72 glass-sidebar flex flex-col hidden md:flex">
         <div class="p-8 flex items-center gap-3">
@@ -46,8 +64,11 @@
 
     <!-- MAIN -->
     <main class="flex-grow flex flex-col min-w-0">
-        <header class="h-16 border-b border-[#27272a] flex items-center justify-between px-8 bg-[#09090b]/50 backdrop-blur-md">
-            <div class="text-sm font-medium text-zinc-400">System / <span class="text-zinc-100">Resilience</span></div>
+        <header class="h-16 border-b border-[#27272a] flex items-center justify-between px-4 md:px-8 bg-[#09090b]/50 backdrop-blur-md">
+            <div class="flex items-center gap-4">
+                <button onclick="toggleNav()" class="md:hidden text-zinc-400"><svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
+                <div class="text-sm font-medium text-zinc-400">System / <span class="text-zinc-100">Resilience</span></div>
+            </div>
         </header>
         <div class="flex-grow overflow-y-auto p-8 lg:p-12">
             <div class="max-w-5xl mx-auto space-y-12">
@@ -93,6 +114,7 @@
     </main>
 
     <script>
+        function toggleNav() { document.getElementById('mobile-nav').classList.toggle('hidden'); }
         function getAuth() { return `${document.getElementById('user').value}:${document.getElementById('pass').value}`; }
         async function snapshot() {
             const res = await fetch('/api/backup', { headers: { 'Authorization': getAuth() } });
