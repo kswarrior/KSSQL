@@ -201,16 +201,40 @@
                     body: sql
                 });
 
-                const data = await res.text();
+                let data = await res.text();
                 const latency = (performance.now() - start).toFixed(2);
                 document.getElementById('latency').innerText = `${latency}ms`;
 
                 if (res.ok) {
-                    out.innerText = data;
-                    out.style.borderColor = "#10b981";
+                    if (data.includes("conflict detected (OCC)")) {
+                         out.innerHTML = `<div class='flex flex-col gap-2'>
+                            <div class='flex items-center gap-3 text-amber-400 font-bold'>
+                                <svg class='w-5 h-5 animate-pulse' fill='none' stroke='currentColor' viewBox='0 0 24 24'><path stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z'/></svg>
+                                <span>OPTIMISTIC CONFLICT DETECTED</span>
+                            </div>
+                            <div class='text-gray-400 text-xs'>Transaction requires manual reconciliation or retry. Hardware safety lock engaged.</div>
+                            <div class='mt-2 p-4 bg-white/5 rounded border border-white/10'>${data}</div>
+                         </div>`;
+                         out.style.borderColor = "#f59e0b";
+                    } else {
+                        out.innerText = data;
+                        out.style.borderColor = "#10b981";
+                    }
                 } else {
-                    out.innerText = `Error: ${data}`;
-                    out.style.borderColor = "#ef4444";
+                    if (data.includes("OCC")) {
+                         out.innerHTML = `<div class='flex flex-col gap-2'>
+                            <div class='flex items-center gap-3 text-amber-500 font-bold'>
+                                <svg class='w-5 h-5' fill='none' stroke='currentColor' viewBox='0 0 24 24'><path stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='M13 10V3L4 14h7v7l9-11h-7z'/></svg>
+                                <span>OCC COLLISION RECONCILED</span>
+                            </div>
+                            <div class='text-gray-400 text-xs'>System attempted optimistic resolution. Please verify current snapshot.</div>
+                            <div class='mt-2 text-red-400'>${data}</div>
+                         </div>`;
+                         out.style.borderColor = "#f59e0b";
+                    } else {
+                        out.innerText = `Error: ${data}`;
+                        out.style.borderColor = "#ef4444";
+                    }
                 }
             } catch (e) {
                 out.innerText = `Network Error: ${e.message}`;

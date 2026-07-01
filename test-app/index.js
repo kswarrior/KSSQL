@@ -16,9 +16,9 @@ app.set('views', path.join(__dirname, 'views'));
 const dbConfig = {
     user: 'admin',
     host: 'localhost',
-    database: 'ksql',
+    database: 'test_ui.ksql',
     password: 'admin',
-    port: process.env.PGPORT || 5432,
+    port: process.env.PGPORT || 5433, // Updated to match Titan-Prime default release port
 };
 
 // Security: Simple escaping for single quotes to prevent basic SQL injection

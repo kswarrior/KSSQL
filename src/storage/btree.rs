@@ -100,6 +100,11 @@ impl BPlusTree {
                     WalEntry::RecordUpdate { key, data } => {
                         memory_tier.insert(key, data);
                     }
+                    WalEntry::RecordBatch { entries } => {
+                        for (key, data) in entries {
+                            memory_tier.insert(key, data);
+                        }
+                    }
                     WalEntry::BinaryBatch { data } => {
                         let mut cursor = 0;
                         while cursor + 4 <= data.len() {

@@ -73,11 +73,13 @@ fn test_wal_recovery() {
             engine.execute("INSERT INTO logs VALUES ('Entry 1')", 0).await.unwrap();
             engine.execute("FLUSH", 0).await.unwrap();
             // Data is in WAL and Pager
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         }
 
         // Re-open engine
         let engine = Engine::new(db_path, wal_path).await.unwrap();
         let res = engine.execute("SELECT * FROM logs", 0).await.unwrap();
+        println!("Recovery Result: |{}|", res);
         assert!(res.contains("Entry 1"));
     });
 
