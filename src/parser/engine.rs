@@ -352,6 +352,26 @@ impl Engine {
     async fn handle_query(&self, query: Query, conn_id: u32) -> Result<String> {
         let version = self.active_transactions.get(&conn_id).map(|tx| tx.snapshot_version).unwrap_or(self.state.current_version.load(std::sync::atomic::Ordering::SeqCst));
         if let SetExpr::Select(select) = &*query.body {
+            if select.from.is_empty() {
+                let mut rcols = Vec::new();
+                let mut results = Vec::new();
+                for proj in &select.projection {
+                    match proj {
+                        sqlparser::ast::SelectItem::UnnamedExpr(expr) => {
+                            rcols.push(expr.to_string());
+                            results.push(expr.to_string());
+                        }
+                        sqlparser::ast::SelectItem::ExprWithAlias { expr, alias } => {
+                            rcols.push(alias.to_string());
+                            results.push(expr.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+                let mut output = rcols.join(" | ") + "\n" + &"-".repeat(rcols.join(" | ").len()) + "\n";
+                output += &(results.join(" | ") + "\n");
+                return Ok(output);
+            }
             let tname = match &select.from[0].relation { TableFactor::Table { name, .. } => name.to_string(), _ => return Err(anyhow!("Unsupported")) };
             let schema = self.state.schemas.get(&tname).ok_or_else(|| anyhow!("Not found"))?.clone();
             let mut rows = self.scan_table_with_filter(&self.state, &tname, version, select.selection.as_ref()).await?;

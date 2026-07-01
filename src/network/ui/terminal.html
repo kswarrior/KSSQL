@@ -3,118 +3,221 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>KS SQL | SQL Fabric</title>
+    <title>KS SQL | Terminal</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
-        body { font-family: 'Inter', sans-serif; background-color: #09090b; color: #f4f4f5; }
-        .glass-sidebar { background: rgba(9, 9, 11, 0.8); backdrop-filter: blur(16px); border-right: 1px solid #27272a; }
-        .nav-item { padding: 10px 16px; border-radius: 8px; margin: 4px 12px; color: #a1a1aa; transition: all 0.2s; font-size: 0.875rem; }
-        .nav-item:hover { background: #18181b; color: #fff; }
-        .nav-item.active { background: #27272a; color: #fff; font-weight: 500; }
-        .card { background: #18181b; border: 1px solid #27272a; border-radius: 12px; }
-        .btn-primary { background: #f4f4f5; color: #09090b; font-weight: 500; border-radius: 8px; }
-        .btn-primary:hover { opacity: 0.9; }
+        :root { --accent: #3b82f6; --bg: #030712; }
+        body { font-family: 'Inter', sans-serif; background-color: var(--bg); color: #f3f4f6; }
+        .glass { background: rgba(17, 24, 39, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.1); }
+        .sidebar-item { transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+        .sidebar-item:hover { background: rgba(59, 130, 246, 0.1); color: #60a5fa; }
+        .sidebar-item.active { background: rgba(59, 130, 246, 0.2); color: #60a5fa; border-right: 3px solid #3b82f6; }
+        .terminal-input { background: #000; border: 1px solid #1f2937; scrollbar-width: thin; scrollbar-color: #374151 transparent; }
+        .btn-glow:hover { box-shadow: 0 0 20px rgba(59, 130, 246, 0.4); }
+        @keyframes pulse-soft { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
+        .animate-pulse-soft { animation: pulse-soft 2s infinite; }
     </style>
 </head>
 <body class="flex h-screen overflow-hidden">
-    <!-- MOBILE NAV -->
-    <div id="mobile-nav" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 hidden md:hidden">
-        <div class="w-72 h-full glass-sidebar flex flex-col">
-            <div class="p-8 flex items-center justify-between">
+    <!-- MOBILE NAV DRAWER -->
+    <div id="mobile-nav" class="fixed inset-0 bg-black/80 backdrop-blur-md z-[100] hidden transition-opacity duration-300 opacity-0 pointer-events-none">
+        <div class="w-72 h-full glass flex flex-col transform -translate-x-full transition-transform duration-300" id="mobile-nav-content">
+            <div class="p-6 flex items-center justify-between border-b border-white/10">
                 <div class="flex items-center gap-3">
-                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-zinc-100"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                    <span class="text-xl font-bold tracking-tight">KS SQL</span>
+                    <svg class="w-8 h-8 text-blue-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+                    <span class="text-xl font-bold tracking-tighter italic">TITAN <span class="text-blue-500">PRIME</span></span>
                 </div>
-                <button onclick="toggleNav()" class="text-zinc-400"><svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+                <button onclick="toggleNav()" class="text-gray-400 hover:text-white">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
             </div>
-            <nav class="flex-grow mt-4">
-                <a href="/" class="nav-item active flex items-center gap-3">Terminal</a>
-                <a href="/resilience" class="nav-item flex items-center gap-3">Resilience</a>
-                <a href="/telemetry" class="nav-item flex items-center gap-3">Telemetry</a>
+            <nav class="flex-grow py-6">
+                <a href="/" class="flex items-center gap-4 px-8 py-4 text-blue-400 bg-blue-500/10 border-r-4 border-blue-500">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+                    Terminal
+                </a>
+                <a href="/resilience" class="flex items-center gap-4 px-8 py-4 text-gray-400 hover:text-white">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+                    Resilience
+                </a>
+                <a href="/telemetry" class="flex items-center gap-4 px-8 py-4 text-gray-400 hover:text-white">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                    Telemetry
+                </a>
             </nav>
         </div>
     </div>
 
-    <!-- SIDEBAR -->
-    <aside class="w-72 glass-sidebar flex flex-col hidden md:flex">
-        <div class="p-8 flex items-center gap-3">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-zinc-100"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-            <span class="text-xl font-bold tracking-tight">KS SQL</span>
+    <!-- SIDEBAR (DESKTOP) -->
+    <aside class="hidden md:flex w-72 flex-col glass border-r-0 relative z-10">
+        <div class="p-8">
+            <div class="flex items-center gap-3">
+                <svg class="w-10 h-10 text-blue-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+                <div>
+                    <h1 class="text-xl font-black tracking-tighter italic leading-none">TITAN</h1>
+                    <span class="text-[10px] font-bold text-blue-500 tracking-[0.3em] uppercase">Prime Engine</span>
+                </div>
+            </div>
         </div>
-        <nav class="flex-grow mt-4">
-            <a href="/" class="nav-item active flex items-center gap-3">
-                <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>
+
+        <nav class="flex-grow px-4 space-y-2 mt-4">
+            <a href="/" class="sidebar-item active flex items-center gap-4 px-6 py-4 rounded-xl text-sm font-semibold">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
                 Terminal
             </a>
-            <a href="/resilience" class="nav-item flex items-center gap-3">
-                <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            <a href="/resilience" class="sidebar-item flex items-center gap-4 px-6 py-4 rounded-xl text-sm font-semibold text-gray-400">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
                 Resilience
             </a>
-            <a href="/telemetry" class="nav-item flex items-center gap-3">
-                <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+            <a href="/telemetry" class="sidebar-item flex items-center gap-4 px-6 py-4 rounded-xl text-sm font-semibold text-gray-400">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
                 Telemetry
             </a>
         </nav>
-        <div class="p-6 border-t border-[#27272a] space-y-4">
-            <input type="text" id="user" value="admin" class="w-full bg-black border border-[#27272a] rounded-lg p-2 text-xs text-zinc-400 outline-none focus:border-zinc-600">
-            <input type="password" id="pass" value="admin" class="w-full bg-black border border-[#27272a] rounded-lg p-2 text-xs text-zinc-400 outline-none focus:border-zinc-600">
+
+        <div class="p-6 border-t border-white/5 space-y-4">
+            <div class="group relative">
+                <input type="text" id="user" value="admin" class="w-full bg-black/50 border border-white/10 rounded-lg p-3 pl-10 text-xs text-gray-300 outline-none focus:border-blue-500 transition-all">
+                <svg class="w-4 h-4 absolute left-3 top-3 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+            </div>
+            <div class="group relative">
+                <input type="password" id="pass" value="admin" class="w-full bg-black/50 border border-white/10 rounded-lg p-3 pl-10 text-xs text-gray-300 outline-none focus:border-blue-500 transition-all">
+                <svg class="w-4 h-4 absolute left-3 top-3 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+            </div>
         </div>
     </aside>
 
-    <!-- MAIN -->
-    <main class="flex-grow flex flex-col min-w-0">
-        <header class="h-16 border-b border-[#27272a] flex items-center justify-between px-4 md:px-8 bg-[#09090b]/50 backdrop-blur-md">
+    <!-- MAIN CONTENT -->
+    <main class="flex-grow flex flex-col min-w-0 bg-[#030712] relative">
+        <!-- HEADER -->
+        <header class="h-20 border-b border-white/5 flex items-center justify-between px-6 md:px-12 glass z-20">
             <div class="flex items-center gap-4">
-                <button onclick="toggleNav()" class="md:hidden text-zinc-400"><svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
-                <div class="text-sm font-medium text-zinc-400">System / <span class="text-zinc-100">Terminal</span></div>
+                <button onclick="toggleNav()" class="md:hidden p-2 hover:bg-white/5 rounded-lg text-gray-400">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16m-7 6h7"/></svg>
+                </button>
+                <div class="text-sm font-medium">
+                    <span class="text-gray-500">System /</span> <span class="text-blue-400 font-bold">SQL Fabric</span>
+                </div>
             </div>
-            <div class="flex items-center gap-4">
-                <div class="flex items-center gap-2 text-[10px] text-zinc-500 font-bold uppercase tracking-wider">
-                    <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span> <span class="hidden sm:inline">Engine Live</span>
+            <div class="flex items-center gap-6">
+                <div id="status" class="flex items-center gap-2 px-4 py-1.5 rounded-full bg-blue-500/10 border border-blue-500/20 text-[10px] font-bold text-blue-400 uppercase tracking-widest animate-pulse-soft">
+                    <span class="w-1.5 h-1.5 rounded-full bg-blue-500 shadow-[0_0_8px_#3b82f6]"></span>
+                    Engine Protocol Active
                 </div>
             </div>
         </header>
-        <div class="flex-grow overflow-y-auto p-8 lg:p-12">
-            <div class="max-w-5xl mx-auto space-y-8">
-                <div class="flex justify-between items-end">
+
+        <div class="flex-grow overflow-y-auto p-6 md:p-12">
+            <div class="max-w-6xl mx-auto space-y-10">
+                <div class="flex flex-col md:flex-row md:items-end justify-between gap-4">
                     <div>
-                        <h2 class="text-3xl font-bold">SQL Fabric</h2>
-                        <p class="text-zinc-500 mt-1">High-throughput instruction layer.</p>
+                        <h2 class="text-4xl font-extrabold tracking-tight">Execution Layer</h2>
+                        <p class="text-gray-400 mt-2 text-lg">Direct hardware instruction interface.</p>
                     </div>
-                    <div id="latency" class="card px-3 py-1.5 text-[10px] font-mono text-emerald-400">0.05ms</div>
-                </div>
-                <div class="card p-1">
-                    <textarea id="sql" class="w-full h-96 bg-zinc-950 text-zinc-100 font-mono text-sm p-6 outline-none rounded-lg resize-none" placeholder="-- Enter SQL command..."></textarea>
-                    <div class="p-4 flex justify-between items-center border-t border-zinc-800 bg-zinc-900/30 rounded-b-lg">
-                        <span class="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">Shift + Enter to Execute</span>
-                        <button onclick="run()" class="btn-primary px-6 py-2 text-sm">Run Query</button>
+                    <div class="flex gap-4">
+                        <div class="glass px-6 py-3 rounded-2xl flex flex-col">
+                            <span class="text-[10px] text-gray-500 font-bold uppercase tracking-wider">Latency</span>
+                            <span id="latency" class="text-blue-400 font-mono text-lg">0.00ms</span>
+                        </div>
                     </div>
                 </div>
-                <div id="out" class="card p-8 min-h-32 font-mono text-xs text-zinc-400 overflow-x-auto whitespace-pre leading-relaxed border-l-4 border-l-zinc-800">READY_FOR_INPUT</div>
+
+                <!-- OPTIMISTIC TERMINAL -->
+                <div class="relative group">
+                    <div class="absolute -inset-1 bg-gradient-to-r from-blue-600 to-indigo-600 rounded-3xl blur opacity-10 group-hover:opacity-20 transition duration-1000"></div>
+                    <div class="relative glass rounded-2xl overflow-hidden shadow-2xl">
+                        <div class="flex items-center justify-between px-6 py-3 border-b border-white/5 bg-white/5">
+                            <div class="flex gap-2">
+                                <div class="w-3 h-3 rounded-full bg-red-500/50"></div>
+                                <div class="w-3 h-3 rounded-full bg-yellow-500/50"></div>
+                                <div class="w-3 h-3 rounded-full bg-green-500/50"></div>
+                            </div>
+                            <span class="text-[10px] font-mono text-gray-500">TITAN_PRIME_V1.1_STABLE</span>
+                        </div>
+                        <textarea id="sql" spellcheck="false" class="w-full h-80 terminal-input text-gray-100 font-mono text-base p-8 outline-none resize-none leading-relaxed" placeholder="-- Type your SQL instructions here..."></textarea>
+
+                        <div class="p-6 flex flex-col sm:flex-row justify-between items-center gap-4 bg-white/5 border-t border-white/5">
+                            <div class="flex items-center gap-3">
+                                <kbd class="px-2 py-1 bg-white/10 rounded text-[10px] text-gray-400 font-bold">Shift + Enter</kbd>
+                                <span class="text-[10px] text-gray-500 font-bold uppercase tracking-widest">To Commit Transaction</span>
+                            </div>
+                            <button onclick="run()" class="btn-glow bg-blue-600 hover:bg-blue-500 text-white px-10 py-3 rounded-xl font-bold text-sm transition-all transform active:scale-95 flex items-center gap-3">
+                                <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 20 20"><path d="M4.5 15.5l11-5.5-11-5.5v11z"/></svg>
+                                Run Query
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- OUTPUT -->
+                <div class="space-y-4">
+                    <h3 class="text-xs font-bold text-gray-500 uppercase tracking-[0.2em] flex items-center gap-3">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                        Transaction Log & Results
+                    </h3>
+                    <div id="out" class="glass rounded-2xl p-8 min-h-[160px] font-mono text-sm text-gray-300 overflow-x-auto whitespace-pre leading-relaxed border-l-4 border-l-blue-600 shadow-xl transition-all duration-500">READY_SYSTEM_IDLE</div>
+                </div>
             </div>
         </div>
     </main>
 
     <script>
-        function toggleNav() { document.getElementById('mobile-nav').classList.toggle('hidden'); }
+        function toggleNav() {
+            const nav = document.getElementById('mobile-nav');
+            const content = document.getElementById('mobile-nav-content');
+            if (nav.classList.contains('hidden')) {
+                nav.classList.remove('hidden');
+                setTimeout(() => {
+                    nav.classList.replace('opacity-0', 'opacity-100');
+                    nav.classList.remove('pointer-events-none');
+                    content.classList.replace('-translate-x-full', 'translate-x-0');
+                }, 10);
+            } else {
+                nav.classList.replace('opacity-100', 'opacity-0');
+                nav.classList.add('pointer-events-none');
+                content.classList.replace('translate-x-0', '-translate-x-full');
+                setTimeout(() => nav.classList.add('hidden'), 300);
+            }
+        }
+
         async function run() {
-            const sql = document.getElementById('sql').value;
+            const sql = document.getElementById('sql').value.trim();
             if(!sql) return;
+
             const user = document.getElementById('user').value;
             const pass = document.getElementById('pass').value;
             const out = document.getElementById('out');
-            out.innerHTML = "<span class='text-zinc-600 animate-pulse'>EXECUTING...</span>";
+
+            // OPTIMISTIC UI: Show running state immediately
+            out.innerHTML = "<div class='flex items-center gap-3 text-blue-400'><svg class='w-4 h-4 animate-spin' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3'><circle cx='12' cy='12' r='10' stroke-opacity='0.2'></circle><path d='M12 2a10 10 0 0 1 10 10' stroke-linecap='round'></path></svg> <span>EXECUTING TITAN PIPELINE...</span></div>";
+            out.style.borderColor = "#3b82f6";
+
             const start = performance.now();
-            const res = await fetch('/api/query', {
-                method: 'POST',
-                headers: { 'Authorization': `${user}:${pass}` },
-                body: sql
-            });
-            out.innerText = await res.text();
-            document.getElementById('latency').innerText = `${(performance.now() - start).toFixed(2)}ms`;
+            try {
+                const res = await fetch('/api/query', {
+                    method: 'POST',
+                    headers: { 'Authorization': `${user}:${pass}` },
+                    body: sql
+                });
+
+                const data = await res.text();
+                const latency = (performance.now() - start).toFixed(2);
+                document.getElementById('latency').innerText = `${latency}ms`;
+
+                if (res.ok) {
+                    out.innerText = data;
+                    out.style.borderColor = "#10b981";
+                } else {
+                    out.innerText = `Error: ${data}`;
+                    out.style.borderColor = "#ef4444";
+                }
+            } catch (e) {
+                out.innerText = `Network Error: ${e.message}`;
+                out.style.borderColor = "#ef4444";
+            }
         }
-        document.addEventListener('keydown', e => { if(e.shiftKey && e.key === 'Enter') run(); });
+        document.addEventListener('keydown', e => { if(e.shiftKey && e.key === 'Enter') { e.preventDefault(); run(); } });
     </script>
 </body>
 </html>

@@ -17,7 +17,7 @@ const dbConfig = {
     host: 'localhost',
     database: 'ksql',
     password: 'admin',
-    port: 5432,
+    port: process.env.PGPORT || 5432,
 };
 
 async function query(sql, params) {
@@ -46,7 +46,7 @@ app.get('/login', (req, res) => {
 app.post('/login', async (req, res) => {
     const { username, password } = req.body;
     try {
-        const result = await query('SELECT * FROM users WHERE username = $1 AND password = $2', [username, password]);
+        const result = await query(`SELECT * FROM users WHERE username = '${username}' AND password = '${password}'`);
         if (result.rows.length > 0) {
             res.cookie('user', username);
             res.redirect('/dashboard');
@@ -65,7 +65,7 @@ app.get('/register', (req, res) => {
 app.post('/register', async (req, res) => {
     const { username, password } = req.body;
     try {
-        await query('INSERT INTO users (username, password) VALUES ($1, $2)', [username, password]);
+        await query(`INSERT INTO users (username, password) VALUES ('${username}', '${password}')`);
         res.redirect('/login');
     } catch (err) {
         res.render('register', { error: 'Registration failed: ' + err.message });
@@ -77,8 +77,17 @@ app.get('/dashboard', async (req, res) => {
         return res.redirect('/login');
     }
     try {
-        const result = await query('SELECT username FROM users');
-        res.render('dashboard', { user: req.cookies.user, allUsers: result.rows });
+        const result = await query('SELECT * FROM users');
+        // Handle table prefixes in result rows
+        const processedRows = result.rows.map(row => {
+            const newRow = {};
+            for (let key in row) {
+                const cleanKey = key.includes('.') ? key.split('.')[1] : key;
+                newRow[cleanKey] = row[key];
+            }
+            return newRow;
+        });
+        res.render('dashboard', { user: req.cookies.user, allUsers: processedRows });
     } catch (err) {
         res.send('Error loading dashboard: ' + err.message);
     }

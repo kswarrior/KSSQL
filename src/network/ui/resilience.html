@@ -5,108 +5,136 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>KS SQL | Resilience</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
-        body { font-family: 'Inter', sans-serif; background-color: #09090b; color: #f4f4f5; }
-        .glass-sidebar { background: rgba(9, 9, 11, 0.8); backdrop-filter: blur(16px); border-right: 1px solid #27272a; }
-        .nav-item { padding: 10px 16px; border-radius: 8px; margin: 4px 12px; color: #a1a1aa; transition: all 0.2s; font-size: 0.875rem; }
-        .nav-item:hover { background: #18181b; color: #fff; }
-        .nav-item.active { background: #27272a; color: #fff; font-weight: 500; }
-        .card { background: #18181b; border: 1px solid #27272a; border-radius: 12px; }
-        .btn-primary { background: #f4f4f5; color: #09090b; font-weight: 500; border-radius: 8px; }
-        .btn-primary:hover { opacity: 0.9; }
+        :root { --accent: #ec4899; --bg: #030712; }
+        body { font-family: 'Inter', sans-serif; background-color: var(--bg); color: #f3f4f6; }
+        .glass { background: rgba(17, 24, 39, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.1); }
+        .sidebar-item { transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+        .sidebar-item:hover { background: rgba(236, 72, 153, 0.1); color: #f472b6; }
+        .sidebar-item.active { background: rgba(236, 72, 153, 0.2); color: #f472b6; border-right: 3px solid #ec4899; }
+        .btn-resilience { transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1); }
+        .btn-resilience:hover { transform: translateY(-2px); box-shadow: 0 10px 25px -5px rgba(236, 72, 153, 0.4); }
+        .version-card { background: radial-gradient(circle at center, rgba(236, 72, 153, 0.15) 0%, transparent 70%); }
     </style>
 </head>
 <body class="flex h-screen overflow-hidden">
-    <!-- MOBILE NAV -->
-    <div id="mobile-nav" class="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 hidden md:hidden">
-        <div class="w-72 h-full glass-sidebar flex flex-col">
-            <div class="p-8 flex items-center justify-between">
+    <!-- MOBILE NAV DRAWER -->
+    <div id="mobile-nav" class="fixed inset-0 bg-black/80 backdrop-blur-md z-[100] hidden transition-opacity duration-300 opacity-0 pointer-events-none">
+        <div class="w-72 h-full glass flex flex-col transform -translate-x-full transition-transform duration-300" id="mobile-nav-content">
+            <div class="p-6 flex items-center justify-between border-b border-white/10">
                 <div class="flex items-center gap-3">
-                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-zinc-100"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                    <span class="text-xl font-bold tracking-tight">KS SQL</span>
+                    <svg class="w-8 h-8 text-pink-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+                    <span class="text-xl font-bold tracking-tighter italic">TITAN <span class="text-pink-500">PRIME</span></span>
                 </div>
-                <button onclick="toggleNav()" class="text-zinc-400"><svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+                <button onclick="toggleNav()" class="text-gray-400 hover:text-white">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+                </button>
             </div>
-            <nav class="flex-grow mt-4">
-                <a href="/" class="nav-item flex items-center gap-3">Terminal</a>
-                <a href="/resilience" class="nav-item active flex items-center gap-3">Resilience</a>
-                <a href="/telemetry" class="nav-item flex items-center gap-3">Telemetry</a>
+            <nav class="flex-grow py-6">
+                <a href="/" class="flex items-center gap-4 px-8 py-4 text-gray-400 hover:text-white">Terminal</a>
+                <a href="/resilience" class="flex items-center gap-4 px-8 py-4 text-pink-400 bg-pink-500/10 border-r-4 border-pink-500">Resilience</a>
+                <a href="/telemetry" class="flex items-center gap-4 px-8 py-4 text-gray-400 hover:text-white">Telemetry</a>
             </nav>
         </div>
     </div>
 
-    <!-- SIDEBAR -->
-    <aside class="w-72 glass-sidebar flex flex-col hidden md:flex">
-        <div class="p-8 flex items-center gap-3">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-zinc-100"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-            <span class="text-xl font-bold tracking-tight">KS SQL</span>
+    <!-- SIDEBAR (DESKTOP) -->
+    <aside class="hidden md:flex w-72 flex-col glass border-r-0 relative z-10">
+        <div class="p-8">
+            <div class="flex items-center gap-3">
+                <svg class="w-10 h-10 text-pink-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+                <div>
+                    <h1 class="text-xl font-black tracking-tighter italic leading-none">TITAN</h1>
+                    <span class="text-[10px] font-bold text-pink-500 tracking-[0.3em] uppercase">Prime Engine</span>
+                </div>
+            </div>
         </div>
-        <nav class="flex-grow mt-4">
-            <a href="/" class="nav-item flex items-center gap-3">
-                <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>
+
+        <nav class="flex-grow px-4 space-y-2 mt-4">
+            <a href="/" class="sidebar-item flex items-center gap-4 px-6 py-4 rounded-xl text-sm font-semibold text-gray-400">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
                 Terminal
             </a>
-            <a href="/resilience" class="nav-item active flex items-center gap-3">
-                <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            <a href="/resilience" class="sidebar-item active flex items-center gap-4 px-6 py-4 rounded-xl text-sm font-semibold">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
                 Resilience
             </a>
-            <a href="/telemetry" class="nav-item flex items-center gap-3">
-                <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+            <a href="/telemetry" class="sidebar-item flex items-center gap-4 px-6 py-4 rounded-xl text-sm font-semibold text-gray-400">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
                 Telemetry
             </a>
         </nav>
-        <div class="p-6 border-t border-[#27272a] space-y-4">
-            <input type="text" id="user" value="admin" class="w-full bg-black border border-[#27272a] rounded-lg p-2 text-xs text-zinc-400 outline-none focus:border-zinc-600">
-            <input type="password" id="pass" value="admin" class="w-full bg-black border border-[#27272a] rounded-lg p-2 text-xs text-zinc-400 outline-none focus:border-zinc-600">
+
+        <div class="p-6 border-t border-white/5 space-y-4">
+            <input type="text" id="user" value="admin" class="w-full bg-black/50 border border-white/10 rounded-lg p-3 text-xs text-gray-300 outline-none focus:border-pink-500 transition-all">
+            <input type="password" id="pass" value="admin" class="w-full bg-black/50 border border-white/10 rounded-lg p-3 text-xs text-gray-300 outline-none focus:border-pink-500 transition-all">
         </div>
     </aside>
 
-    <!-- MAIN -->
-    <main class="flex-grow flex flex-col min-w-0">
-        <header class="h-16 border-b border-[#27272a] flex items-center justify-between px-4 md:px-8 bg-[#09090b]/50 backdrop-blur-md">
+    <!-- MAIN CONTENT -->
+    <main class="flex-grow flex flex-col min-w-0 bg-[#030712] relative">
+        <header class="h-20 border-b border-white/5 flex items-center justify-between px-6 md:px-12 glass z-20">
             <div class="flex items-center gap-4">
-                <button onclick="toggleNav()" class="md:hidden text-zinc-400"><svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
-                <div class="text-sm font-medium text-zinc-400">System / <span class="text-zinc-100">Resilience</span></div>
+                <button onclick="toggleNav()" class="md:hidden p-2 hover:bg-white/5 rounded-lg text-gray-400">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16m-7 6h7"/></svg>
+                </button>
+                <div class="text-sm font-medium"><span class="text-gray-500">System /</span> <span class="text-pink-400 font-bold">Resilience Protocols</span></div>
             </div>
         </header>
-        <div class="flex-grow overflow-y-auto p-8 lg:p-12">
-            <div class="max-w-5xl mx-auto space-y-12">
-                <div>
-                    <h2 class="text-3xl font-bold">Resilience Control</h2>
-                    <p class="text-zinc-500 mt-1">State persistence and multi-process hot-swap protocols.</p>
+
+        <div class="flex-grow overflow-y-auto p-6 md:p-12">
+            <div class="max-w-6xl mx-auto space-y-12">
+                <div class="space-y-2">
+                    <h2 class="text-4xl font-extrabold tracking-tight">Durability Controller</h2>
+                    <p class="text-gray-400 text-lg">Manage point-in-time snapshots and state hot-swapping.</p>
                 </div>
 
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
-                    <div class="card p-8 space-y-6">
-                        <div class="flex items-center gap-3">
-                            <div class="p-2 bg-zinc-800 rounded-lg text-zinc-100">
-                                <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
-                            </div>
-                            <h3 class="font-bold">Binary Snapshot</h3>
+                    <!-- SNAPSHOT -->
+                    <div class="glass p-10 rounded-3xl space-y-8 group relative overflow-hidden">
+                        <div class="absolute top-0 right-0 p-8 text-white/5 transform group-hover:scale-110 transition-transform">
+                            <svg class="w-32 h-32" fill="currentColor" viewBox="0 0 24 24"><path d="M4 16v1a2 2 0 002 2h12a2 2 0 002-2v-1M7 10l5 5 5-5M12 15V3"/></svg>
                         </div>
-                        <p class="text-sm text-zinc-500">Trigger a zero-copy, point-in-time binary clone of the active KSQL storage file.</p>
-                        <button onclick="snapshot()" class="btn-primary w-full py-3">Download Snapshot</button>
+                        <div class="flex items-center gap-4">
+                            <div class="p-4 bg-pink-500/20 rounded-2xl text-pink-400">
+                                <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a2 2 0 002 2h12a2 2 0 002-2v-1M7 10l5 5 5-5M12 15V3"/></svg>
+                            </div>
+                            <h3 class="text-2xl font-bold">Binary Snapshot</h3>
+                        </div>
+                        <p class="text-gray-400 leading-relaxed">Trigger a zero-copy, atomic snapshot of the current database state for physical offloading.</p>
+                        <button onclick="snapshot()" class="btn-resilience w-full bg-pink-600 hover:bg-pink-500 text-white py-4 rounded-2xl font-bold flex items-center justify-center gap-3">
+                            Execute Protocol
+                        </button>
                     </div>
 
-                    <div class="card p-8 space-y-6">
-                        <div class="flex items-center gap-3">
-                            <div class="p-2 bg-zinc-800 rounded-lg text-rose-400">
-                                <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                            </div>
-                            <h3 class="font-bold text-rose-400">State Hot-Swap</h3>
+                    <!-- HOT-SWAP -->
+                    <div class="glass p-10 rounded-3xl space-y-8 group relative overflow-hidden border-rose-500/20">
+                        <div class="absolute top-0 right-0 p-8 text-rose-500/5 transform group-hover:scale-110 transition-transform">
+                            <svg class="w-32 h-32" fill="currentColor" viewBox="0 0 24 24"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
                         </div>
-                        <p class="text-sm text-zinc-500">Seamlessly replace the persistence layer with an external module from a remote URL.</p>
-                        <button onclick="hotswap()" class="btn-primary bg-rose-100 hover:bg-rose-200 text-rose-950 w-full py-3">Inject State</button>
+                        <div class="flex items-center gap-4">
+                            <div class="p-4 bg-rose-500/20 rounded-2xl text-rose-400">
+                                <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                            </div>
+                            <h3 class="text-2xl font-bold text-rose-400">Module Injection</h3>
+                        </div>
+                        <p class="text-gray-400 leading-relaxed">Live-replace the core persistence module with a remote state definition without downtime.</p>
+                        <button onclick="hotswap()" class="btn-resilience w-full border-2 border-rose-500/30 hover:bg-rose-500/10 text-rose-400 py-4 rounded-2xl font-bold flex items-center justify-center gap-3">
+                            Initiate Swap
+                        </button>
                     </div>
                 </div>
 
-                <div class="card p-10 flex flex-col items-center justify-center text-center space-y-8 bg-zinc-900/10">
-                    <div class="text-[10px] uppercase font-bold text-zinc-500 tracking-widest">Global Sequence Version</div>
-                    <div class="text-7xl font-bold text-zinc-100 tabular-nums" id="version">0</div>
-                    <div class="flex gap-4">
-                        <button onclick="undo()" class="px-8 py-2 border border-zinc-700 rounded-lg hover:bg-zinc-800 text-sm font-medium transition-colors">Revert State</button>
-                        <button onclick="redo()" class="px-8 py-2 bg-zinc-800 border border-zinc-700 rounded-lg hover:bg-zinc-700 text-sm font-medium transition-colors">Fast Forward</button>
+                <!-- VERSIONING -->
+                <div class="glass rounded-3xl p-12 version-card border-pink-500/10 flex flex-col items-center justify-center text-center space-y-10">
+                    <div class="space-y-2">
+                        <span class="text-[10px] font-black text-pink-500 uppercase tracking-[0.4em]">Global Sequence Cluster</span>
+                        <div class="text-8xl font-black tabular-nums tracking-tighter text-white" id="version">0000</div>
+                    </div>
+                    <div class="flex flex-wrap justify-center gap-6">
+                        <button onclick="undo()" class="px-10 py-3 bg-white/5 hover:bg-white/10 rounded-xl border border-white/10 font-bold text-sm transition-all active:scale-95">REVERT_STATE</button>
+                        <button onclick="redo()" class="px-10 py-3 bg-white/5 hover:bg-white/10 rounded-xl border border-white/10 font-bold text-sm transition-all active:scale-95">FAST_FORWARD</button>
                     </div>
                 </div>
             </div>
@@ -114,18 +142,35 @@
     </main>
 
     <script>
-        function toggleNav() { document.getElementById('mobile-nav').classList.toggle('hidden'); }
+        function toggleNav() {
+            const nav = document.getElementById('mobile-nav');
+            const content = document.getElementById('mobile-nav-content');
+            if (nav.classList.contains('hidden')) {
+                nav.classList.remove('hidden');
+                setTimeout(() => {
+                    nav.classList.replace('opacity-0', 'opacity-100');
+                    nav.classList.remove('pointer-events-none');
+                    content.classList.replace('-translate-x-full', 'translate-x-0');
+                }, 10);
+            } else {
+                nav.classList.replace('opacity-100', 'opacity-0');
+                nav.classList.add('pointer-events-none');
+                content.classList.replace('translate-x-0', '-translate-x-full');
+                setTimeout(() => nav.classList.add('hidden'), 300);
+            }
+        }
+
         function getAuth() { return `${document.getElementById('user').value}:${document.getElementById('pass').value}`; }
         async function snapshot() {
             const res = await fetch('/api/backup', { headers: { 'Authorization': getAuth() } });
             if(res.ok) {
                 const blob = await res.blob();
                 const url = URL.createObjectURL(blob);
-                const a = document.createElement('a'); a.href = url; a.download = 'backup.ksql'; a.click();
+                const a = document.createElement('a'); a.href = url; a.download = 'titan_snapshot.ksql'; a.click();
             }
         }
         async function hotswap() {
-            const url = prompt("Remote Module URL:");
+            const url = prompt("Titan Module URL:");
             if(url) await fetch('/api/hotswap', { method:'POST', headers:{'Authorization':getAuth()}, body:JSON.stringify({url}) });
         }
         async function undo() { await fetch('/api/undo', {method:'POST', headers:{'Authorization':getAuth()}}); }
@@ -134,7 +179,7 @@
         const socket = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`);
         socket.onmessage = (e) => {
             const msg = JSON.parse(e.data);
-            if(msg.type === 'metric') { document.getElementById('version').innerText = msg.sys_version || 0; }
+            if(msg.type === 'metric') { document.getElementById('version').innerText = (msg.sys_version || 0).toString().padStart(4, '0'); }
         };
     </script>
 </body>
