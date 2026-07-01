@@ -55,19 +55,33 @@ impl Wal {
                 let _ = file.read_to_end(&mut buffer);
 
                 let mut cursor = 0;
-                while cursor + 4 <= buffer.len() {
-                    let len_bytes: [u8; 4] = buffer[cursor..cursor + 4].try_into().unwrap_or([0; 4]);
+                while cursor + 8 <= buffer.len() {
+                    let checksum_bytes: [u8; 4] = buffer[cursor..cursor + 4].try_into().unwrap_or([0; 4]);
+                    let stored_checksum = u32::from_le_bytes(checksum_bytes);
+
+                    let len_bytes: [u8; 4] = buffer[cursor + 4..cursor + 8].try_into().unwrap_or([0; 4]);
                     let len = u32::from_le_bytes(len_bytes) as usize;
-                    if len == 0 {
+
+                    if len == 0 && stored_checksum == 0 {
                         // Skip zeros (O_DIRECT padding)
                         cursor = (cursor / 4096 + 1) * 4096;
                         if cursor >= buffer.len() { break; }
                         continue;
                     }
-                    cursor += 4;
+
+                    cursor += 8;
                     if cursor + len <= buffer.len() {
-                        if let Ok(entry) = bincode::deserialize::<WalEntry>(&buffer[cursor..cursor + len]) {
-                            recovered.push(entry);
+                        let data = &buffer[cursor..cursor + len];
+
+                        // Verify checksum
+                        let mut hasher = crc32fast::Hasher::new();
+                        hasher.update(data);
+                        if hasher.finalize() == stored_checksum {
+                            if let Ok(entry) = bincode::deserialize::<WalEntry>(data) {
+                                recovered.push(entry);
+                            }
+                        } else {
+                            eprintln!("[WAL] Checksum mismatch at offset {}, skipping entry", cursor - 8);
                         }
                         cursor += len;
                     } else {
@@ -111,19 +125,16 @@ impl Wal {
                         batch_buf.clear();
                         let mut entries = Vec::with_capacity(100_000);
                         while let Some(entry) = q_clone.pop() {
-                            match &entry {
-                                WalEntry::BinaryBatch { data } => {
-                                    batch_buf.extend_from_slice(data);
-                                    entries.push(entry);
-                                }
-                                _ => {
-                                    if let Ok(encoded) = bincode::serialize(&entry) {
-                                        let len = encoded.len() as u32;
-                                        batch_buf.extend_from_slice(&len.to_le_bytes());
-                                        batch_buf.extend_from_slice(&encoded);
-                                        entries.push(entry);
-                                    }
-                                }
+                            if let Ok(encoded) = bincode::serialize(&entry) {
+                                let len = encoded.len() as u32;
+                                let mut hasher = crc32fast::Hasher::new();
+                                hasher.update(&encoded);
+                                let checksum = hasher.finalize();
+
+                                batch_buf.extend_from_slice(&checksum.to_le_bytes());
+                                batch_buf.extend_from_slice(&len.to_le_bytes());
+                                batch_buf.extend_from_slice(&encoded);
+                                entries.push(entry);
                             }
                             if batch_buf.len() > 32 * 1024 * 1024 { break; }
                         }
@@ -167,19 +178,16 @@ impl Wal {
                         batch_buf.clear();
                         let mut entries = Vec::with_capacity(50_000);
                         while let Some(entry) = q_clone.pop() {
-                            match &entry {
-                                WalEntry::BinaryBatch { data } => {
-                                    batch_buf.extend_from_slice(data);
-                                    entries.push(entry);
-                                }
-                                _ => {
-                                    if let Ok(encoded) = bincode::serialize(&entry) {
-                                        let len = encoded.len() as u32;
-                                        batch_buf.extend_from_slice(&len.to_le_bytes());
-                                        batch_buf.extend_from_slice(&encoded);
-                                        entries.push(entry);
-                                    }
-                                }
+                            if let Ok(encoded) = bincode::serialize(&entry) {
+                                let len = encoded.len() as u32;
+                                let mut hasher = crc32fast::Hasher::new();
+                                hasher.update(&encoded);
+                                let checksum = hasher.finalize();
+
+                                batch_buf.extend_from_slice(&checksum.to_le_bytes());
+                                batch_buf.extend_from_slice(&len.to_le_bytes());
+                                batch_buf.extend_from_slice(&encoded);
+                                entries.push(entry);
                             }
                             if batch_buf.len() > 16 * 1024 * 1024 { break; }
                         }
