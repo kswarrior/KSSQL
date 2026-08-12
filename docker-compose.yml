@@ -4,10 +4,12 @@ services:
     build: .
     ports:
       - "5432:5432"
+      - "5435:5435" # Secondary Titan-Prime TCP Port
       - "8080:8080"
     volumes:
       - ./data:/app/data
     environment:
       - KSQL_ADMIN=admin
       - KSQL_PASSWORD=password
+    command: ["./target/release/ks-sql", "--port", "w:8080", "m:5432", "m:5435", "--db", "/app/data/ks_database.ksql"]
     restart: always

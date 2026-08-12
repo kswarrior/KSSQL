@@ -62,11 +62,13 @@ impl Server {
                 let pass_clone = admin_pass.clone();
                 next_conn_id += 1;
                 tokio::spawn(async move {
+                    println!("\x1b[38;5;82m[TCP]\x1b[0m Incoming Connection ID: {}", conn_id);
                     if let Err(e) =
                         handle_tcp_connection(socket, engine, tx, conn_id, user_clone, pass_clone).await
                     {
-                        eprintln!("TCP Error: {}", e);
+                        eprintln!("\x1b[31m[TCP ERROR]\x1b[0m ID {}: {}", conn_id, e);
                     }
+                    println!("\x1b[38;5;198m[TCP]\x1b[0m Connection ID {} Closed", conn_id);
                 });
             }
         });
@@ -133,11 +135,15 @@ async fn handle_tcp_connection(
 
     loop {
         line.clear();
-        let n = reader.read_line(&mut line).await?;
+        let n = tokio::time::timeout(tokio::time::Duration::from_secs(300), reader.read_line(&mut line))
+            .await
+            .map_err(|_| anyhow::anyhow!("Connection Timeout"))??;
+
         if n == 0 {
             return Ok(());
         }
         let input = line.trim().to_string();
+        if input.is_empty() { continue; }
 
         if !authenticated {
             if input.starts_with("AUTH ") {
@@ -145,12 +151,14 @@ async fn handle_tcp_connection(
                 if provided == format!("{}:{}", user, pass) {
                     authenticated = true;
                     let _ = writer.write_all(b"AUTHENTICATED\n").await;
+                    println!("\x1b[38;5;82m[AUTH]\x1b[0m Connection {} Authenticated", conn_id);
                     continue;
                 }
             }
             let _ = writer
                 .write_all(b"ERROR: Authentication Required. Send 'AUTH <user>:<pass>'\n")
                 .await;
+            println!("\x1b[31m[AUTH]\x1b[0m Connection {} Authentication Failed", conn_id);
             return Ok(());
         }
 

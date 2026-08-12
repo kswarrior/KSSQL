@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use sqlparser::ast::{Expr, Query, SetExpr, Statement, TableFactor, Value};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use tokio::sync::Mutex as AsyncMutex;
 use wasmi::*;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -52,6 +53,7 @@ pub struct EngineState {
 pub struct Engine {
     pub state: Arc<EngineState>,
     pub active_transactions: DashMap<u32, Transaction>,
+    pub insert_lock: AsyncMutex<()>,
     pub wasm_engine: wasmi::Engine,
     pub hardware_specs: HardwareSpecs,
     pub autopilot: bool,
@@ -80,6 +82,16 @@ impl Engine {
                 std::sync::atomic::Ordering::SeqCst,
             );
         }
+        // Scan MemoryTier for even newer version from WAL
+        if let Some(data) = btree.memory_tier.get(b"__version__") {
+            if let Ok(record) = bincode::deserialize::<Record>(&data) {
+                if let Ok(v) = bincode::deserialize::<u64>(&record.value) {
+                    if v > current_version.load(std::sync::atomic::Ordering::SeqCst) {
+                        current_version.store(v, std::sync::atomic::Ordering::SeqCst);
+                    }
+                }
+            }
+        }
 
         let engine_state = Arc::new(EngineState {
             db_path: db_path.to_string(),
@@ -96,12 +108,13 @@ impl Engine {
             tokio_uring::start(async move {
                 loop {
                     let mut entries = Vec::new();
-                    for _ in 0..1000 {
-                        if let Some(entry) = state_for_drain.btree.wal.pop_entry() {
+                    loop {
+                        if let Some(entry) = state_for_drain.btree.wal.drain_queue.pop() {
                             entries.push(entry);
                         } else {
                             break;
                         }
+                        if entries.len() >= 1000 { break; }
                     }
 
                     if entries.is_empty() {
@@ -110,8 +123,11 @@ impl Engine {
                     }
 
                     for entry in entries {
-                        if let WalEntry::RecordUpdate { key, data } = entry {
-                            let _ = state_for_drain.btree.insert(key, data).await;
+                        match entry {
+                            WalEntry::RecordUpdate { key, data } => {
+                                let _ = state_for_drain.btree.insert(key, data).await;
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -121,6 +137,7 @@ impl Engine {
         Ok(Engine {
             state: engine_state,
             active_transactions: DashMap::new(),
+            insert_lock: AsyncMutex::new(()),
             wasm_engine: wasmi::Engine::default(),
             hardware_specs,
             autopilot: true,
@@ -173,9 +190,17 @@ impl Engine {
     pub async fn execute(&self, sql: &str, conn_id: u32) -> Result<String> {
         let sql_upper = sql.trim().to_uppercase();
         if sql_upper == "FLUSH" {
+            println!("\x1b[38;5;220m[ENGINE]\x1b[0m FLUSH Protocol Initiated by Connection {}", conn_id);
             self.state.btree.wal.flush_pipeline().await?;
-            while self.state.btree.wal.pop_entry().is_some() {} // Wait for drain (simplified)
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            // Wait for background drain to catch up
+            let mut retries = 0;
+            while !self.state.btree.wal.is_empty() && retries < 200 {
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                retries += 1;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+            self.state.btree.pager.sync().await?;
+            println!("\x1b[38;5;82m[ENGINE]\x1b[0m FLUSH Complete.");
             return Ok("Flushed".to_string());
         }
         if sql_upper.starts_with("SEARCH") {
@@ -294,7 +319,8 @@ impl Engine {
             }
             Statement::CreateTable { name, columns, .. } => {
                 let auto_increment_col = columns.iter().find(|c| {
-                    c.options.iter().any(|o| {
+                    let type_str = c.data_type.to_string().to_uppercase();
+                    type_str.contains("SERIAL") || c.options.iter().any(|o| {
                         let opt_str = o.to_string().to_uppercase();
                         opt_str.contains("AUTO_INCREMENT") || opt_str.contains("SERIAL")
                     })
@@ -327,9 +353,9 @@ impl Engine {
             Statement::Explain { statement, .. } => {
                 Ok(format!("Execution Plan (Titan-Prime):\n- io_uring I/O\n- O_DIRECT DMA\n- Lock-Free ArrayQueue\n- Ping-Pong Double Buffering\n- Statement: {:?}", statement))
             }
-            Statement::Insert { table_name, source, .. } => {
+            Statement::Insert { table_name, columns, source, .. } => {
                 let source = source.ok_or_else(|| anyhow!("Source missing"))?;
-                self.handle_insert(table_name.to_string(), source, conn_id).await
+                self.handle_insert(table_name.to_string(), columns, source, conn_id).await
             }
             Statement::Query(query) => self.handle_query(*query, conn_id).await,
             Statement::Update { table, assignments, selection, .. } => {
@@ -353,6 +379,16 @@ impl Engine {
     fn evaluate_where(expr: &Expr, row: &HashMap<String, String>) -> bool {
         match expr {
             Expr::BinaryOp { left, op, right } => {
+                match op {
+                    sqlparser::ast::BinaryOperator::And => {
+                        return Self::evaluate_where(left, row) && Self::evaluate_where(right, row);
+                    }
+                    sqlparser::ast::BinaryOperator::Or => {
+                        return Self::evaluate_where(left, row) || Self::evaluate_where(right, row);
+                    }
+                    _ => {}
+                }
+
                 let get_data = |e: &Expr| -> String {
                     match e {
                         Expr::Identifier(ident) => {
@@ -385,17 +421,25 @@ impl Engine {
                 let left_val = get_data(left);
                 let right_val = get_data(right);
 
+                if let (Ok(l_num), Ok(r_num)) = (left_val.parse::<f64>(), right_val.parse::<f64>()) {
+                    return match op {
+                        sqlparser::ast::BinaryOperator::Eq => l_num == r_num,
+                        sqlparser::ast::BinaryOperator::NotEq => l_num != r_num,
+                        sqlparser::ast::BinaryOperator::Gt => l_num > r_num,
+                        sqlparser::ast::BinaryOperator::Lt => l_num < r_num,
+                        sqlparser::ast::BinaryOperator::GtEq => l_num >= r_num,
+                        sqlparser::ast::BinaryOperator::LtEq => l_num <= r_num,
+                        _ => false,
+                    };
+                }
+
                 match op {
-                    sqlparser::ast::BinaryOperator::Eq => {
-                        if left_val.is_empty() && right_val.is_empty() {
-                            false
-                        } else {
-                            left_val == right_val
-                        }
-                    }
+                    sqlparser::ast::BinaryOperator::Eq => left_val == right_val,
                     sqlparser::ast::BinaryOperator::NotEq => left_val != right_val,
                     sqlparser::ast::BinaryOperator::Gt => left_val > right_val,
                     sqlparser::ast::BinaryOperator::Lt => left_val < right_val,
+                    sqlparser::ast::BinaryOperator::GtEq => left_val >= right_val,
+                    sqlparser::ast::BinaryOperator::LtEq => left_val <= right_val,
                     _ => false,
                 }
             }
@@ -445,8 +489,33 @@ impl Engine {
 
             for assignment in &assignments {
                 let col = assignment.id[0].to_string();
-                let val = assignment.value.to_string().replace("'", "");
-                row_data.insert(col, val);
+                let expr = &assignment.value;
+                let current_val = row_data.get(&col).cloned().unwrap_or_default();
+
+                let new_val = match expr {
+                    Expr::BinaryOp { left, op, right } => {
+                        let l_val = match &**left {
+                            Expr::Identifier(ident) if ident.to_string() == col => current_val.clone(),
+                            _ => left.to_string().replace("'", ""),
+                        };
+                        let r_val = right.to_string().replace("'", "");
+
+                        if let (Ok(ln), Ok(rn)) = (l_val.parse::<f64>(), r_val.parse::<f64>()) {
+                            let res = match op {
+                                sqlparser::ast::BinaryOperator::Plus => ln + rn,
+                                sqlparser::ast::BinaryOperator::Minus => ln - rn,
+                                sqlparser::ast::BinaryOperator::Multiply => ln * rn,
+                                sqlparser::ast::BinaryOperator::Divide => if rn != 0.0 { ln / rn } else { 0.0 },
+                                _ => ln,
+                            };
+                            res.to_string()
+                        } else {
+                            expr.to_string().replace("'", "")
+                        }
+                    }
+                    _ => expr.to_string().replace("'", ""),
+                };
+                row_data.insert(col, new_val);
             }
 
             record.value = bincode::serialize(&row_data)?;
@@ -463,6 +532,17 @@ impl Engine {
 
                 self.state.btree.memory_tier.insert(key.clone(), val_final.clone());
                 self.state.btree.wal.enqueue(WalEntry::RecordUpdate { key, data: val_final })?;
+
+                // Persist system version
+                let version_record = Record {
+                    value: bincode::serialize(&v)?,
+                    version: v,
+                    is_deleted: false,
+                    timestamp: Utc::now().timestamp(),
+                };
+                let vr_bytes = bincode::serialize(&version_record)?;
+                self.state.btree.memory_tier.insert(b"__version__".to_vec(), vr_bytes.clone());
+                self.state.btree.wal.enqueue(WalEntry::RecordUpdate { key: b"__version__".to_vec(), data: vr_bytes })?;
             }
             count += 1;
         }
@@ -522,6 +602,17 @@ impl Engine {
 
                 self.state.btree.memory_tier.insert(key.clone(), val_final.clone());
                 self.state.btree.wal.enqueue(WalEntry::RecordUpdate { key, data: val_final })?;
+
+                // Persist system version
+                let version_record = Record {
+                    value: bincode::serialize(&v)?,
+                    version: v,
+                    is_deleted: false,
+                    timestamp: Utc::now().timestamp(),
+                };
+                let vr_bytes = bincode::serialize(&version_record)?;
+                self.state.btree.memory_tier.insert(b"__version__".to_vec(), vr_bytes.clone());
+                self.state.btree.wal.enqueue(WalEntry::RecordUpdate { key: b"__version__".to_vec(), data: vr_bytes })?;
             }
             count += 1;
         }
@@ -535,9 +626,11 @@ impl Engine {
     pub async fn handle_insert(
         &self,
         table_name: String,
+        columns: Vec<sqlparser::ast::Ident>,
         source: Box<Query>,
         conn_id: u32,
     ) -> Result<String> {
+        let _lock = self.insert_lock.lock().await;
         let schema = self
             .state
             .schemas
@@ -558,15 +651,29 @@ impl Engine {
                     next_id += 1;
                 }
 
-                for (i, expr) in row.iter().enumerate() {
-                    let col_idx = if schema.auto_increment_col.is_some() { i + 1 } else { i };
-                    if col_idx < schema.columns.len() {
-                        let val = match expr {
-                            Expr::Value(Value::Number(n, _)) => n.clone(),
-                            Expr::Value(Value::SingleQuotedString(s)) => s.clone(),
-                            _ => "NULL".to_string(),
-                        };
-                        row_data.insert(schema.columns[col_idx].clone(), val);
+                if columns.is_empty() {
+                    for (i, expr) in row.iter().enumerate() {
+                        let col_idx = if schema.auto_increment_col.is_some() { i + 1 } else { i };
+                        if col_idx < schema.columns.len() {
+                            let val = match expr {
+                                Expr::Value(Value::Number(n, _)) => n.clone(),
+                                Expr::Value(Value::SingleQuotedString(s)) => s.clone(),
+                                _ => "NULL".to_string(),
+                            };
+                            row_data.insert(schema.columns[col_idx].clone(), val);
+                        }
+                    }
+                } else {
+                    for (i, expr) in row.iter().enumerate() {
+                        if i < columns.len() {
+                            let col_name = columns[i].to_string();
+                            let val = match expr {
+                                Expr::Value(Value::Number(n, _)) => n.clone(),
+                                Expr::Value(Value::SingleQuotedString(s)) => s.clone(),
+                                _ => "NULL".to_string(),
+                            };
+                            row_data.insert(col_name, val);
+                        }
                     }
                 }
                 let id = rand::random::<u64>();
@@ -625,6 +732,7 @@ impl Engine {
                     is_deleted: false,
                     timestamp: Utc::now().timestamp(),
                 };
+                self.state.btree.memory_tier.insert(b"__schemas__".to_vec(), bincode::serialize(&record)?);
                 self.state.btree.wal.enqueue(WalEntry::RecordUpdate {
                     key: b"__schemas__".to_vec(),
                     data: bincode::serialize(&record)?
@@ -721,6 +829,27 @@ impl Engine {
                 }
             }
 
+            if !query.order_by.is_empty() {
+                left_rows.sort_by(|a, b| {
+                    for ob in &query.order_by {
+                        let col = ob.expr.to_string();
+                        let va = a.get(&col).or(a.keys().find(|k| k.ends_with(&format!(".{}", col))).and_then(|k| a.get(k))).cloned().unwrap_or_default();
+                        let vb = b.get(&col).or(b.keys().find(|k| k.ends_with(&format!(".{}", col))).and_then(|k| b.get(k))).cloned().unwrap_or_default();
+
+                        let cmp = if let (Ok(na), Ok(nb)) = (va.parse::<f64>(), vb.parse::<f64>()) {
+                            na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal)
+                        } else {
+                            va.cmp(&vb)
+                        };
+
+                        if cmp != std::cmp::Ordering::Equal {
+                            return if ob.asc.unwrap_or(true) { cmp } else { cmp.reverse() };
+                        }
+                    }
+                    std::cmp::Ordering::Equal
+                });
+            }
+
             if let Some(limit_expr) = &query.limit {
                 if let Expr::Value(Value::Number(n, _)) = limit_expr {
                     if let Ok(limit) = n.parse::<usize>() {
@@ -792,7 +921,14 @@ impl Engine {
                     if val.is_none() {
                         let parts: Vec<&str> = c.split('.').collect();
                         if parts.len() == 2 {
-                            val = row.get(parts[1]).cloned();
+                            let col_name = parts[1];
+                            val = row.get(col_name).cloned();
+                            if val.is_none() {
+                                // Try case-insensitive fallback
+                                val = row.iter()
+                                    .find(|(k, _)| k.eq_ignore_ascii_case(col_name))
+                                    .map(|(_, v)| v.clone());
+                            }
                         }
                     }
                     vals.push(val.unwrap_or("NULL".to_string()));
@@ -823,7 +959,7 @@ impl Engine {
     ) -> Result<Vec<HashMap<String, String>>> {
         let prefix = format!("{}:", table_name);
         let mut rows = Vec::new();
-        let mut processed_keys = std::collections::HashSet::new();
+        let mut processed_keys = HashSet::new();
 
         // 0. Check for Index Lookup
         if let Some(Expr::BinaryOp { left, op, right }) = filter {
@@ -868,6 +1004,7 @@ impl Engine {
         // 1. Scan MemoryTier first for immediate consistency
         for r in state.btree.memory_tier.cache.iter() {
             let key = r.key();
+            processed_keys.insert(key.clone());
             let key_str = String::from_utf8_lossy(key);
             if key_str.starts_with(&prefix) {
                 let record: Record = bincode::deserialize(r.value())?;
@@ -880,7 +1017,6 @@ impl Engine {
                         row_data.insert(format!("{}.{}", table_name, k), v);
                     }
                     rows.push(row_data);
-                    processed_keys.insert(key.clone());
                 }
             }
         }
@@ -902,24 +1038,28 @@ impl Engine {
         loop {
             let page = state.btree.pager.read_page(current_page_id).await?;
             let node = Node::from_bytes(&page)?;
-            for (i, key) in node.keys.iter().enumerate() {
+            let keys = node.keys.clone();
+            let values = node.values.clone();
+            for (i, key) in keys.iter().enumerate() {
+                if i >= values.len() { break; }
                 if processed_keys.contains(key) {
                     continue;
                 }
                 let key_str = String::from_utf8_lossy(key);
                 if key_str.starts_with(&prefix) {
-                    let record: Record = bincode::deserialize(&node.values[i])?;
-                    if record.version <= version && !record.is_deleted {
-                        let base_data: HashMap<String, String> =
-                            bincode::deserialize(&record.value)?;
-                        let mut row_data = HashMap::new();
-                        row_data.insert("__key__".to_string(), key_str.to_string());
-                        for (k, v) in base_data {
-                            row_data.insert(k.clone(), v.clone());
-                            row_data.insert(format!("{}.{}", table_name, k), v);
+                    if let Ok(record) = bincode::deserialize::<Record>(&values[i]) {
+                        if record.version <= version && !record.is_deleted {
+                            if let Ok(base_data) = bincode::deserialize::<HashMap<String, String>>(&record.value) {
+                                let mut row_data = HashMap::new();
+                                row_data.insert("__key__".to_string(), key_str.to_string());
+                                for (k, v) in base_data {
+                                    row_data.insert(k.clone(), v.clone());
+                                    row_data.insert(format!("{}.{}", table_name, k), v);
+                                }
+                                rows.push(row_data);
+                                processed_keys.insert(key.clone());
+                            }
                         }
-                        rows.push(row_data);
-                        processed_keys.insert(key.clone());
                     }
                 }
             }
